@@ -5,3 +5,15 @@ version = 4
 [[package]]
 name = "motogear-api"
 version = "0.1.0"
+
+[[package]]
+name = "motogear-domain"
+version = "0.1.0"
+
+[[package]]
+name = "motogear-persistence"
+version = "0.1.0"
+
+[[package]]
+name = "motogear-workers"
+version = "0.1.0"
