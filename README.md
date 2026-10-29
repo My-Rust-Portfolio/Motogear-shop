@@ -35,3 +35,16 @@ The command inserts three customers and eight products in one transaction. It
 only inserts missing rows: rerunning it does not change existing product data
 or restore stock that has already been sold. The phone mount starts with one
 unit when it is first inserted.
+
+## Start the API
+
+After the database migrations have been applied, start the API:
+
+```powershell
+cargo run -p motogear-api
+```
+
+The API currently exposes `GET /health/live` for process liveness and
+`GET /health/ready` for database schema readiness. The live route does not
+depend on PostgreSQL; readiness returns HTTP 503 until all migrations included
+in this build have been applied.

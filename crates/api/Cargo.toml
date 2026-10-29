@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+dotenvy = "0.15.7"
+motogear-persistence = { version = "0.1.0", path = "../persistence" }
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread"] }
