@@ -48,3 +48,29 @@ The API currently exposes `GET /health/live` for process liveness and
 `GET /health/ready` for database schema readiness. The live route does not
 depend on PostgreSQL; readiness returns HTTP 503 until all migrations included
 in this build have been applied.
+
+The read-only catalogue endpoints are:
+
+- `GET /api/v1/customers?limit=20&offset=0` — demo identities for the customer selector.
+- `GET /api/v1/products?limit=20&offset=0` — active products, ordered by SKU.
+  `limit` defaults to 20 and must be between 1 and 100; `offset` defaults to 0
+  and may not exceed 100000. Product prices are returned as integer EUR cents.
+
+For example, in PowerShell:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:3000/api/v1/products
+```
+
+## Test the catalogue API
+
+The API tests use PostgreSQL. Set `TEST_DATABASE_URL` to a database where the
+test role can create schemas, then run:
+
+```powershell
+cargo test -p motogear-api
+```
+
+Database-backed tests create a uniquely named schema, apply the real migrations
+and seed data there, and drop that schema when the test finishes. They do not
+change the database's `public` schema.
