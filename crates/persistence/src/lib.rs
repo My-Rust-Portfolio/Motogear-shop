@@ -1,7 +1,7 @@
 use sqlx::{
     PgPool,
     migrate::{MigrateError, Migrator},
-    postgres::PgPoolOptions,
+    postgres::{PgConnectOptions, PgPoolOptions},
 };
 
 // The path is relative to this crate's Cargo.toml. Embedding the migrations
@@ -13,6 +13,14 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
     PgPoolOptions::new()
         .max_connections(10)
         .connect(database_url)
+        .await
+}
+
+/// Opens a PostgreSQL pool from structured connection settings.
+pub async fn connect_with(options: PgConnectOptions) -> Result<PgPool, sqlx::Error> {
+    PgPoolOptions::new()
+        .max_connections(10)
+        .connect_with(options)
         .await
 }
 
