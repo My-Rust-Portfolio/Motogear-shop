@@ -22,3 +22,16 @@ run again: SQLx records which migrations have already been applied.
 For a PostgreSQL server running somewhere else, set `POSTGRES_HOST` and
 `POSTGRES_PORT` in `.env`. The defaults target the Compose service from the
 Windows host (`127.0.0.1:5433`).
+
+## Seed demo data
+
+After applying the migrations, insert the fictional customers and products:
+
+```powershell
+cargo run -p motogear-persistence --bin seed
+```
+
+The command inserts three customers and eight products in one transaction. It
+only inserts missing rows: rerunning it does not change existing product data
+or restore stock that has already been sold. The phone mount starts with one
+unit when it is first inserted.

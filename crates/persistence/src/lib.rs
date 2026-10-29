@@ -1,3 +1,6 @@
+pub mod config;
+pub mod seed;
+
 use sqlx::{
     PgPool,
     migrate::{MigrateError, Migrator},

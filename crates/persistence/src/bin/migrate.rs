@@ -1,7 +1,6 @@
-use std::{env, error::Error, io, process};
+use std::{error::Error, process};
 
-use motogear_persistence::{connect_with, run_migrations};
-use sqlx::postgres::PgConnectOptions;
+use motogear_persistence::{config::postgres_options_from_env, connect_with, run_migrations};
 
 fn main() {
     if let Err(error) = run() {
@@ -16,43 +15,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
     // where Compose supplies these variables directly.
     let _ = dotenvy::dotenv();
 
-    let username = required_env("POSTGRES_USER")?;
-    let password = required_env("POSTGRES_PASSWORD")?;
-    let database = required_env("POSTGRES_DB")?;
-    let host = env_or("POSTGRES_HOST", "127.0.0.1");
-    let port = env_or("POSTGRES_PORT", "5433")
-        .parse::<u16>()
-        .map_err(|source| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("POSTGRES_PORT must be a valid port number: {source}"),
-            )
-        })?;
-
-    let options = PgConnectOptions::new()
-        .host(&host)
-        .port(port)
-        .username(&username)
-        .password(&password)
-        .database(&database);
-
-    let pool = connect_with(options).await?;
+    let pool = connect_with(postgres_options_from_env()?).await?;
     run_migrations(&pool).await?;
     pool.close().await;
 
     println!("Database migrations are up to date.");
     Ok(())
-}
-
-fn required_env(name: &str) -> Result<String, io::Error> {
-    env::var(name).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{name} must be set in the environment or .env file"),
-        )
-    })
-}
-
-fn env_or(name: &str, default: &str) -> String {
-    env::var(name).unwrap_or_else(|_| default.to_owned())
 }
