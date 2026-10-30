@@ -53,12 +53,11 @@ Open the browser shop at <http://127.0.0.1:3000/>. Axum serves the HTML, CSS,
 and vanilla JavaScript from the same process as the API, with no frontend build
 step. The page loads the customer selector and catalogue from the API, remembers
 the selected customer per tab, and refreshes shared product stock every two
-seconds while the tab is visible. The customer selection is demo state only at
-this stage; it does not affect any shop operation because checkout is not
-implemented yet. Product quantity controls and the cart are also browser-only:
-they show a draft selection but do not create an order or reserve stock. The
-browser requests up to 100 active products so the current demo catalogue fits
-in one response; pagination controls can replace this when the catalogue grows.
+seconds while the tab is visible. Product quantity controls and the cart are
+browser-only: they show a draft selection but do not submit an order or reserve
+stock. The browser requests up to 100 active products so the current demo
+catalogue fits in one response; pagination controls can replace this when the
+catalogue grows.
 
 The read-only catalogue endpoints are:
 
@@ -71,6 +70,31 @@ For example, in PowerShell:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:3000/api/v1/products
+```
+
+Order submission is available through `POST /api/v1/orders`. Send a UUID in the
+`Idempotency-Key` header and a JSON body no larger than 64 KiB, containing a
+customer ID and one or more product/quantity pairs. The server validates the
+request, calculates prices from the current catalogue, and creates a pending
+order with its outbox event in one transaction. A first submission returns
+`201 Created`; retrying the same key and request returns `200 OK` with the same
+order ID. Reusing a key with a different request returns `409 Conflict`. This
+API endpoint is not wired to the browser cart yet, and order submission does
+not change stock.
+Use customer and product IDs returned by the catalogue endpoints in the
+request body.
+
+```http
+POST /api/v1/orders
+Idempotency-Key: 7ad79984-d034-457f-81aa-3a2445f59b85
+Content-Type: application/json
+
+{
+  "customer_id": "e436db5a-a10a-4933-9b45-5059b6e79f77",
+  "items": [
+    { "product_id": "4fb5f5d4-5577-4c4f-a7c1-719f8cf6296d", "quantity": 1 }
+  ]
+}
 ```
 
 ## Database-backed tests
