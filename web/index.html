@@ -28,7 +28,7 @@
               <option>Loading customers…</option>
             </select>
             <span id="customer-status" class="customer-status" aria-live="polite">
-              Saved for this tab; checkout is not connected yet.
+              Checkout uses this customer; choice is saved for this tab.
             </span>
           </label>
         </div>
@@ -70,7 +70,15 @@
             </div>
             <p id="cart-empty" class="cart-empty">Your cart is empty.</p>
             <ul id="cart-items" class="cart-items" aria-live="polite"></ul>
-            <p class="cart-note">Browser-only draft. Adding items does not place an order or reserve stock.</p>
+            <div class="checkout-controls">
+              <button id="checkout-button" class="checkout-button" type="button" disabled>
+                Place order
+              </button>
+              <p id="checkout-status" class="checkout-status" role="status" aria-live="polite"></p>
+            </div>
+            <p id="cart-note" class="cart-note">
+              Prices are estimates. Checkout uses current catalogue prices and does not reserve stock.
+            </p>
           </aside>
 
           <div id="products" class="product-grid" aria-live="polite" aria-busy="true"></div>

@@ -167,11 +167,22 @@ button, select { font: inherit; }
 .cart-item-details { display: grid; gap: 3px; }
 .cart-item-name { color: var(--ink); font-size: 13px; font-weight: 700; }
 .cart-item-price { color: var(--muted); font-size: 11px; }
+.cart-item-availability { font-size: 10px; }
+.cart-item-availability.available { color: var(--green); }
+.cart-item-availability.out-of-stock, .cart-item-availability.no-longer-available, .cart-item-availability.previously-selected { color: var(--red); }
 .cart-item-actions { display: flex; align-items: center; gap: 12px; }
 .cart-item-line-total { color: var(--ink); font-size: 13px; font-weight: 750; white-space: nowrap; }
 .cart-remove, .add-to-cart { border: 0; border-radius: 7px; cursor: pointer; font: inherit; }
 .cart-remove { padding: 6px 8px; background: #f4f5f7; color: #596779; font-size: 11px; }
 .cart-remove:hover { background: #e9edf1; }
+.cart-remove:disabled { color: #a5adb8; cursor: not-allowed; }
+.checkout-controls { display: flex; align-items: center; gap: 14px; margin-top: 16px; }
+.checkout-button { min-height: 38px; padding: 9px 15px; border: 0; border-radius: 8px; background: var(--orange); color: #fff; cursor: pointer; font: inherit; font-size: 12px; font-weight: 800; }
+.checkout-button:hover:not(:disabled) { background: #d96622; }
+.checkout-button:disabled { background: #c4cad2; cursor: not-allowed; }
+.checkout-status { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.checkout-status.error { color: var(--red); }
+.checkout-status.success { color: var(--green); }
 
 .product-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 
@@ -223,6 +234,7 @@ button, select { font: inherit; }
   .section-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
   .refresh-status { text-align: left; }
   .cart-panel { padding: 15px; }
+  .checkout-controls { align-items: flex-start; flex-direction: column; gap: 8px; }
   .cart-item { align-items: flex-start; }
   .cart-item-actions { align-items: end; flex-direction: column; gap: 6px; }
   .product-grid { grid-template-columns: 1fr; gap: 11px; }

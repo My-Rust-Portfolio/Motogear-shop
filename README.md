@@ -53,8 +53,9 @@ Open the browser shop at <http://127.0.0.1:3000/>. Axum serves the HTML, CSS,
 and vanilla JavaScript from the same process as the API, with no frontend build
 step. The page loads the customer selector and catalogue from the API, remembers
 the selected customer per tab, and refreshes shared product stock every two
-seconds while the tab is visible. Product quantity controls and the cart are
-browser-only: they show a draft selection but do not submit an order or reserve
+seconds while the tab is visible. Product quantity controls and the cart build
+a draft order in the browser. Checkout sends only the selected customer ID,
+product IDs, and quantities; the API calculates prices and does not reserve
 stock. The browser requests up to 100 active products so the current demo
 catalogue fits in one response; pagination controls can replace this when the
 catalogue grows.
@@ -78,9 +79,10 @@ customer ID and one or more product/quantity pairs. The server validates the
 request, calculates prices from the current catalogue, and creates a pending
 order with its outbox event in one transaction. A first submission returns
 `201 Created`; retrying the same key and request returns `200 OK` with the same
-order ID. Reusing a key with a different request returns `409 Conflict`. This
-API endpoint is not wired to the browser cart yet, and order submission does
-not change stock.
+order ID. The browser keeps an uncertain checkout request and its key in tab
+storage so the customer can retry safely after a connection failure. Reusing a
+key with a different request returns `409 Conflict`. Order submission does not
+change stock.
 Use customer and product IDs returned by the catalogue endpoints in the
 request body.
 
