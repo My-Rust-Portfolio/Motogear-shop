@@ -184,6 +184,25 @@ button, select { font: inherit; }
 .checkout-status.error { color: var(--red); }
 .checkout-status.success { color: var(--green); }
 
+.orders-panel { margin: 30px 0 26px; padding: 20px; border: 1px solid var(--line); border-radius: 13px; background: #fff; }
+.orders-heading { margin-bottom: 16px; }
+.order-list { display: grid; gap: 11px; }
+.orders-empty { margin: 0; padding: 20px 0 4px; color: var(--muted); font-size: 13px; }
+.order-card { padding: 15px 16px; border: 1px solid var(--line); border-radius: 10px; background: #fcfcfd; }
+.order-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.order-card-heading h3 { margin: 0; overflow-wrap: anywhere; color: var(--ink); font-size: 13px; font-weight: 750; }
+.order-status { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; background: #edf0f3; color: var(--muted); font-size: 10px; font-weight: 800; text-transform: capitalize; }
+.order-status-pending { background: #fff4df; color: #8c5b09; }
+.order-status-accepted { background: #e6f3ec; color: var(--green); }
+.order-status-rejected { background: #f8e9e9; color: var(--red); }
+.order-status-shipped { background: #e8eef7; color: #365d91; }
+.order-status-unknown { background: #edf0f3; color: var(--muted); }
+.order-summary { margin: 9px 0; color: var(--muted); font-size: 11px; }
+.order-items { display: grid; gap: 5px; margin: 0; padding-left: 18px; color: var(--ink); font-size: 11px; }
+.order-rejection, .order-tracking { margin: 9px 0 0; font-size: 11px; line-height: 1.45; }
+.order-rejection { color: var(--red); }
+.order-tracking { color: var(--green); }
+
 .product-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 
 .product-card {
@@ -234,6 +253,7 @@ button, select { font: inherit; }
   .section-heading { align-items: flex-start; flex-direction: column; gap: 8px; }
   .refresh-status { text-align: left; }
   .cart-panel { padding: 15px; }
+  .orders-panel { padding: 15px; }
   .checkout-controls { align-items: flex-start; flex-direction: column; gap: 8px; }
   .cart-item { align-items: flex-start; }
   .cart-item-actions { align-items: end; flex-direction: column; gap: 6px; }

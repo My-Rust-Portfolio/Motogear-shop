@@ -65,7 +65,7 @@ async fn products(
     }
 }
 
-fn parse_pagination(
+pub(super) fn parse_pagination(
     query: Result<Query<PageQuery>, QueryRejection>,
 ) -> Result<(u32, u32), Response> {
     let Query(query) = query.map_err(|_| {

@@ -81,6 +81,18 @@
             </p>
           </aside>
 
+          <section class="orders-panel" aria-labelledby="orders-title">
+            <div class="section-heading orders-heading">
+              <div>
+                <p class="eyebrow">YOUR ACTIVITY</p>
+                <h2 id="orders-title">My orders</h2>
+              </div>
+              <p id="orders-refresh" class="refresh-status" aria-live="polite">Waiting for customer…</p>
+            </div>
+            <p id="orders-empty" class="orders-empty" hidden>No orders for this customer yet.</p>
+            <div id="orders-list" class="order-list" aria-live="polite" aria-busy="true"></div>
+          </section>
+
           <div id="products" class="product-grid" aria-live="polite" aria-busy="true"></div>
           <p id="empty-state" class="empty-state" hidden>No active products are available right now.</p>
           <p class="catalogue-note">Stock is shared with other shop windows and may change as orders are processed.</p>

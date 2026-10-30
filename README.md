@@ -163,6 +163,16 @@ change stock.
 Use customer and product IDs returned by the catalogue endpoints in the
 request body.
 
+Order progress can be read with `GET /api/v1/orders/{order_id}`. A customer's
+newest orders are available from `GET /api/v1/customers/{customer_id}/orders`
+with the same bounded `limit` and `offset` parameters as the catalogue list
+endpoints. The order response includes its status, purchase-time item prices,
+and any rejection reason or shipment tracking details. The browser shows the
+selected customer's latest 20 orders and refreshes their status while the tab
+is open. After checkout, it reads the returned order details before clearing
+the saved retry request; if the POST response is unclear, the same idempotent
+retry key can recover the order ID and the detail endpoint confirms the result.
+
 ```http
 POST /api/v1/orders
 Idempotency-Key: 7ad79984-d034-457f-81aa-3a2445f59b85
@@ -192,8 +202,9 @@ Database-backed tests create a uniquely named schema, apply the real migrations
 and seed data there, and drop that schema when the test finishes. They do not
 change the database's `public` schema. Persistence tests cover order submission,
 idempotency, purchase-time prices, outbox atomicity and publishing state
-transitions, inventory acceptance/rejection, duplicate delivery, rollback, and
-concurrent duplicate processing.
+transitions, inventory acceptance/rejection, duplicate delivery, rollback,
+concurrent duplicate processing, and order detail/history responses including
+purchase-time prices, status changes, rejection reasons, and shipment data.
 
 The real Kafka-to-PostgreSQL inventory pipeline test is ignored during ordinary
 test runs because it requires the local broker and `TEST_DATABASE_URL`. Run it

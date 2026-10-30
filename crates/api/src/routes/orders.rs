@@ -1,29 +1,103 @@
 use axum::{
     Json, Router,
     extract::{
-        DefaultBodyLimit, Json as JsonExtractor, State,
-        rejection::{BytesRejection, FailedToBufferBody, JsonRejection},
+        DefaultBodyLimit, Json as JsonExtractor, Path, Query, State,
+        rejection::{
+            BytesRejection, FailedToBufferBody, JsonRejection, PathRejection, QueryRejection,
+        },
     },
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use motogear_domain::orders::{OrderRequest, OrderRequestItem};
-use motogear_persistence::orders::submit_order;
+use motogear_persistence::orders::{get_order_details, list_customer_orders, submit_order};
 use uuid::Uuid;
 
 pub const MAX_ORDER_REQUEST_BYTES: usize = 64 * 1024;
 
+use super::catalogue::parse_pagination;
 use crate::{
-    dto::orders::{CreateOrderRequest, OrderSubmissionResponse},
-    error::{ApiError, api_error},
+    dto::{
+        catalogue::PageQuery,
+        orders::{CreateOrderRequest, OrderResponse, OrderSubmissionResponse},
+    },
+    error::{ApiError, api_error, database_error_response},
     state::AppState,
 };
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/orders", post(create_order))
+        .route("/api/v1/orders/{order_id}", get(order_detail))
+        .route(
+            "/api/v1/customers/{customer_id}/orders",
+            get(customer_orders),
+        )
         .layer(DefaultBodyLimit::max(MAX_ORDER_REQUEST_BYTES))
+}
+
+async fn order_detail(
+    State(state): State<AppState>,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Response {
+    let Path(order_id) = match path {
+        Ok(path) => path,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_order_id",
+                "The order ID must be a UUID.",
+            );
+        }
+    };
+
+    match get_order_details(&state.pool, order_id).await {
+        Ok(Some(order)) => Json(OrderResponse::from(order)).into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "order_not_found",
+            "The order was not found.",
+        ),
+        Err(error) => database_error_response("order detail query failed", error),
+    }
+}
+
+async fn customer_orders(
+    State(state): State<AppState>,
+    path: Result<Path<Uuid>, PathRejection>,
+    query: Result<Query<PageQuery>, QueryRejection>,
+) -> Response {
+    let Path(customer_id) = match path {
+        Ok(path) => path,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_customer_id",
+                "The customer ID must be a UUID.",
+            );
+        }
+    };
+    let (limit, offset) = match parse_pagination(query) {
+        Ok(page) => page,
+        Err(response) => return response,
+    };
+
+    match list_customer_orders(&state.pool, customer_id, limit, offset).await {
+        Ok(Some(orders)) => Json(
+            orders
+                .into_iter()
+                .map(OrderResponse::from)
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
+        Ok(None) => api_error(
+            StatusCode::NOT_FOUND,
+            "customer_not_found",
+            "The customer was not found.",
+        ),
+        Err(error) => database_error_response("customer order query failed", error),
+    }
 }
 
 async fn create_order(

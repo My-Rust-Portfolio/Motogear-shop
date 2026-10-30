@@ -7,6 +7,9 @@ const customerStatus = document.querySelector("#customer-status");
 const connectionIndicator = document.querySelector("#connection-indicator");
 const connectionStatus = document.querySelector("#connection-status");
 const catalogueRefresh = document.querySelector("#catalogue-refresh");
+const ordersRefresh = document.querySelector("#orders-refresh");
+const ordersContainer = document.querySelector("#orders-list");
+const ordersEmptyState = document.querySelector("#orders-empty");
 const productsContainer = document.querySelector("#products");
 const emptyState = document.querySelector("#empty-state");
 const cartCount = document.querySelector("#cart-count");
@@ -21,12 +24,17 @@ const eurFormatter = new Intl.NumberFormat(undefined, {
   style: "currency",
   currency: "EUR",
 });
+const ORDER_STATUS_CLASSES = new Set(["pending", "accepted", "rejected", "shipped"]);
 
 let productRequestInFlight = false;
 let hasProductSnapshot = false;
 let lastSuccessfulRefresh = null;
 let checkoutInFlight = false;
 let customersAvailable = false;
+let ordersRequestInFlight = false;
+let ordersRefreshQueued = false;
+let ordersGeneration = 0;
+let hasOrdersSnapshot = false;
 const cart = new Map();
 const quantityChoices = new Map();
 let pendingCheckout = readPendingCheckout();
@@ -63,6 +71,64 @@ function isProduct(value) {
     && value.price_cents >= 0
     && Number.isSafeInteger(value.stock_available)
     && value.stock_available >= 0;
+}
+
+function isOrderItem(value) {
+  return value !== null
+    && typeof value === "object"
+    && isUuid(value.product_id)
+    && typeof value.sku === "string"
+    && typeof value.name === "string"
+    && Number.isInteger(value.quantity)
+    && value.quantity > 0
+    && Number.isSafeInteger(value.unit_price_cents)
+    && value.unit_price_cents >= 0;
+}
+
+function isOrder(value) {
+  return value !== null
+    && typeof value === "object"
+    && isUuid(value.id)
+    && isUuid(value.customer_id)
+    && typeof value.status === "string"
+    && value.status.trim().length > 0
+    && Number.isSafeInteger(value.total_cents)
+    && value.total_cents >= 0
+    && value.currency === "EUR"
+    && (value.rejection_reason === null || typeof value.rejection_reason === "string")
+    && typeof value.created_at === "string"
+    && Number.isFinite(Date.parse(value.created_at))
+    && typeof value.updated_at === "string"
+    && Number.isFinite(Date.parse(value.updated_at))
+    && (value.tracking_reference === null || typeof value.tracking_reference === "string")
+    && (value.shipped_at === null
+      || (typeof value.shipped_at === "string" && Number.isFinite(Date.parse(value.shipped_at))))
+    && Array.isArray(value.items)
+    && value.items.length > 0
+    && value.items.every(isOrderItem);
+}
+
+function orderIdFromLocation(location) {
+  if (typeof location !== "string") return null;
+  try {
+    const url = new URL(location, window.location.origin);
+    if (url.origin !== window.location.origin) return null;
+    const match = url.pathname.match(/^\/api\/v1\/orders\/([^/]+)$/);
+    return match && isUuid(match[1]) ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+function orderMatchesRequest(order, request) {
+  if (order.customer_id !== request.customer_id || order.items.length !== request.items.length) {
+    return false;
+  }
+  const requestedItems = [...request.items].sort((left, right) => left.product_id.localeCompare(right.product_id));
+  const returnedItems = [...order.items].sort((left, right) => left.product_id.localeCompare(right.product_id));
+  return requestedItems.every((item, index) =>
+    item.product_id === returnedItems[index].product_id
+      && item.quantity === returnedItems[index].quantity);
 }
 
 function isValidPendingCheckout(value) {
@@ -239,6 +305,7 @@ async function loadCustomers() {
     saveCustomerId(customerSelect.value);
     customerStatus.textContent = "Checkout uses this customer; choice is saved for this tab.";
     updateCheckoutControls();
+    refreshOrders(true);
   } catch (error) {
     customerSelect.replaceChildren();
     const option = document.createElement("option");
@@ -356,6 +423,57 @@ function renderProducts(products) {
   productsContainer.replaceChildren(fragment);
   emptyState.hidden = products.length !== 0;
   productsContainer.hidden = products.length === 0;
+}
+
+function createOrderCard(order) {
+  const card = document.createElement("article");
+  card.className = "order-card";
+
+  const heading = document.createElement("div");
+  heading.className = "order-card-heading";
+  const title = document.createElement("h3");
+  title.textContent = `Order ${order.id}`;
+  const status = document.createElement("span");
+  const knownStatusClass = ORDER_STATUS_CLASSES.has(order.status) ? order.status : "unknown";
+  status.className = `order-status order-status-${knownStatusClass}`;
+  status.textContent = order.status;
+  heading.append(title, status);
+
+  const summary = document.createElement("p");
+  summary.className = "order-summary";
+  summary.textContent = `Placed ${new Date(order.created_at).toLocaleString()} · Total ${eurFormatter.format(order.total_cents / 100)}`;
+
+  const items = document.createElement("ul");
+  items.className = "order-items";
+  for (const item of order.items) {
+    const line = document.createElement("li");
+    line.textContent = `${item.name} (${item.sku}) · ${item.quantity} × ${eurFormatter.format(item.unit_price_cents / 100)}`;
+    items.append(line);
+  }
+
+  card.append(heading, summary, items);
+  if (order.rejection_reason) {
+    const rejection = document.createElement("p");
+    rejection.className = "order-rejection";
+    rejection.textContent = `Reason: ${order.rejection_reason}`;
+    card.append(rejection);
+  }
+  if (order.tracking_reference) {
+    const tracking = document.createElement("p");
+    tracking.className = "order-tracking";
+    tracking.textContent = `Simulated tracking: ${order.tracking_reference}`;
+    card.append(tracking);
+  }
+
+  return card;
+}
+
+function renderOrders(orders) {
+  const fragment = document.createDocumentFragment();
+  for (const order of orders) fragment.append(createOrderCard(order));
+  ordersContainer.replaceChildren(fragment);
+  ordersEmptyState.hidden = orders.length !== 0;
+  ordersContainer.hidden = orders.length === 0;
 }
 
 function renderCart() {
@@ -505,6 +623,51 @@ async function refreshProducts() {
   }
 }
 
+async function refreshOrders(force = false) {
+  if (document.hidden) return;
+  const customerId = customerSelect.value;
+  if (!isUuid(customerId)) return;
+  if (ordersRequestInFlight) {
+    if (force) ordersRefreshQueued = true;
+    return;
+  }
+
+  ordersRequestInFlight = true;
+  ordersRefreshQueued = false;
+  const generation = ordersGeneration;
+  ordersContainer.setAttribute("aria-busy", "true");
+  if (!hasOrdersSnapshot) ordersRefresh.textContent = "Loading orders…";
+
+  try {
+    const orders = await fetchJson(
+      `/api/v1/customers/${encodeURIComponent(customerId)}/orders?limit=20&offset=0`,
+      "orders",
+    );
+    if (!Array.isArray(orders) || !orders.every(isOrder)) {
+      throw new ApiRequestError("The API returned an invalid order list.");
+    }
+    if (generation !== ordersGeneration || customerId !== customerSelect.value) return;
+
+    renderOrders(orders);
+    hasOrdersSnapshot = true;
+    ordersRefresh.textContent = `Updated at ${formatRefreshTime(new Date())}`;
+  } catch (error) {
+    if (generation !== ordersGeneration || customerId !== customerSelect.value) return;
+    const reason = error instanceof Error ? error.message : "Orders could not be loaded.";
+    ordersRefresh.textContent = hasOrdersSnapshot
+      ? `Refresh failed: ${reason} Showing the previous order list.`
+      : `Orders could not be loaded: ${reason}`;
+    if (!hasOrdersSnapshot) ordersContainer.textContent = "Order history is temporarily unavailable.";
+  } finally {
+    ordersRequestInFlight = false;
+    if (generation === ordersGeneration) ordersContainer.setAttribute("aria-busy", "false");
+    if (ordersRefreshQueued && !document.hidden) {
+      ordersRefreshQueued = false;
+      refreshOrders(true);
+    }
+  }
+}
+
 function createPendingCheckout() {
   const request = {
     customer_id: customerSelect.value,
@@ -586,26 +749,45 @@ async function submitCheckout() {
       try {
         body = await response.json();
       } catch {
+        body = null;
+      }
+
+      const orderId = (body && isUuid(body.id) ? body.id : null)
+        ?? orderIdFromLocation(response.headers.get("Location"));
+      if (!orderId) {
         setCheckoutStatus(
-          `The server may have accepted the order, but its response could not be read. ${pendingRetryGuidance()}`,
+          `The server may have accepted the order, but its response did not identify it. ${pendingRetryGuidance()}`,
           "error",
         );
         return;
       }
 
-      if (!isUuid(body.id) || typeof body.status !== "string") {
+      let confirmedOrder;
+      try {
+        confirmedOrder = await fetchJson(`/api/v1/orders/${encodeURIComponent(orderId)}`, "order confirmation");
+      } catch (error) {
+        const reason = error instanceof Error ? ` ${error.message}` : "";
         setCheckoutStatus(
-          `The server may have accepted the order, but returned an unexpected response. ${pendingRetryGuidance()}`,
+          `The server accepted the checkout, but its order details could not be confirmed.${reason} ${pendingRetryGuidance()}`,
+          "error",
+        );
+        return;
+      }
+      if (!isOrder(confirmedOrder)
+        || confirmedOrder.id !== orderId
+        || !orderMatchesRequest(confirmedOrder, pendingCheckout.request)) {
+        setCheckoutStatus(
+          `The server may have accepted the order, but the returned order did not match the saved request. ${pendingRetryGuidance()}`,
           "error",
         );
         return;
       }
 
-      const orderId = body.id;
       clearPendingCheckout();
       cart.clear();
-      setCheckoutStatus(`Order ${orderId} was submitted and is ${body.status}.`, "success");
+      setCheckoutStatus(`Order ${orderId} was submitted and is ${confirmedOrder.status}.`, "success");
       renderCart();
+      refreshOrders(true);
       return;
     }
 
@@ -643,11 +825,21 @@ async function submitCheckout() {
 
 customerSelect.addEventListener("change", () => {
   saveCustomerId(customerSelect.value);
+  ordersGeneration += 1;
+  hasOrdersSnapshot = false;
+  ordersContainer.replaceChildren();
+  ordersContainer.hidden = false;
+  ordersEmptyState.hidden = true;
+  ordersRefresh.textContent = "Loading orders…";
+  refreshOrders(true);
   setCheckoutStatus("");
 });
 checkoutButton.addEventListener("click", submitCheckout);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refreshProducts();
+  if (!document.hidden) {
+    refreshProducts();
+    refreshOrders(true);
+  }
 });
 
 if (pendingCheckout) {
@@ -660,4 +852,7 @@ if (pendingCheckout) {
 renderCart();
 loadCustomers();
 refreshProducts();
-window.setInterval(refreshProducts, PRODUCT_POLL_INTERVAL_MS);
+window.setInterval(() => {
+  refreshProducts();
+  refreshOrders();
+}, PRODUCT_POLL_INTERVAL_MS);
