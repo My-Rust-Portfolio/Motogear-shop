@@ -834,6 +834,9 @@ dependencies = [
 [[package]]
 name = "motogear-domain"
 version = "0.1.0"
+dependencies = [
+ "uuid",
+]
 
 [[package]]
 name = "motogear-persistence"

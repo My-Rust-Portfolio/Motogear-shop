@@ -1,5 +1,7 @@
 use std::fmt;
 
+pub mod orders;
+
 /// A non-negative EUR amount stored as whole cents.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Money {
