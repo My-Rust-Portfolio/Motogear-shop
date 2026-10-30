@@ -55,7 +55,7 @@ highly available.
 After applying migrations, start the publisher in a separate terminal:
 
 ```powershell
-cargo run -p motogear-workers
+cargo run -p motogear-workers --bin publisher
 ```
 
 It reads the oldest unpublished outbox row, sends its stored payload to the
@@ -244,7 +244,7 @@ run:
 ```powershell
 cargo test -p motogear-api
 cargo test -p motogear-persistence
-cargo test -p motogear-workers --bin inventory
+cargo test -p motogear-workers --test inventory_pipeline
 ```
 
 Database-backed tests create a uniquely named schema, apply the real migrations
@@ -263,5 +263,5 @@ It verifies `OrderCreated` → `OrderAccepted` → `OrderShipped` and consumer r
 behavior. Run it explicitly after starting PostgreSQL and Kafka:
 
 ```powershell
-cargo test -p motogear-workers --bin inventory kafka_order_lifecycle_pipeline_and_consumer_restart_are_idempotent -- --ignored
+cargo test -p motogear-workers --test inventory_pipeline kafka_order_lifecycle_pipeline_and_consumer_restart_are_idempotent -- --ignored
 ```

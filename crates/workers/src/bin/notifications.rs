@@ -1,9 +1,4 @@
-use std::{
-    env,
-    error::Error,
-    io,
-    time::{Duration, Instant},
-};
+use std::{env, error::Error};
 
 use motogear_persistence::{
     connect_with,
@@ -13,34 +8,15 @@ use motogear_persistence::{
     },
     postgres_options_from_env,
 };
-use rdkafka::{
-    ClientConfig,
-    consumer::{CommitMode, Consumer, StreamConsumer},
-    message::{BorrowedMessage, Message},
+use motogear_workers::runtime::{
+    ConsumerSettings, EventLogContext, EventSpec, ParsedRecord, ReceiveOutcome, RetryOutcome,
+    ShutdownSignal, build_consumer, commit_skipped_record, parse_record as parse_event_record,
+    payload_or_skip, recv_or_shutdown, retry_database_operation,
 };
-use serde::Deserialize;
-use tokio::time::sleep;
-use uuid::Uuid;
-
-const RETRY_START: Duration = Duration::from_secs(1);
-const RETRY_MAX: Duration = Duration::from_secs(30);
-const MAX_RETRY_DURATION: Duration = Duration::from_secs(5 * 60);
-
-#[derive(Debug, Deserialize)]
-struct EventHeader {
-    event_id: Uuid,
-    event_type: String,
-    schema_version: i32,
-}
-
-enum ParsedRecord {
-    LifecycleEvent(OrderLifecycleEvent),
-    Skip {
-        event_id: Option<Uuid>,
-        event_type: Option<String>,
-        reason: String,
-    },
-}
+use rdkafka::{
+    consumer::{CommitMode, Consumer},
+    message::Message,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -50,141 +26,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let brokers = env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_owned());
     let topic = env::var("KAFKA_ORDERS_TOPIC").unwrap_or_else(|_| "shop.orders.v1".to_owned());
     let pool = connect_with(postgres_options_from_env()?).await?;
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &brokers)
-        .set("group.id", NOTIFICATIONS_CONSUMER_NAME)
-        .set("enable.auto.commit", "false")
-        .set("enable.auto.offset.store", "false")
-        .set("auto.offset.reset", "earliest")
-        .create()?;
+    let consumer = build_consumer(ConsumerSettings {
+        brokers: &brokers,
+        group_id: NOTIFICATIONS_CONSUMER_NAME,
+    })?;
     consumer.subscribe(&[&topic])?;
 
     println!("Notification consumer subscribed to {topic} at {brokers}");
-    let shutdown_signal = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown_signal);
+    let mut shutdown_signal = ShutdownSignal::new();
 
     'message_loop: loop {
-        let message = tokio::select! {
-            biased;
-            signal_result = &mut shutdown_signal => {
-                signal_result?;
+        let message = match recv_or_shutdown(&consumer, &mut shutdown_signal).await? {
+            ReceiveOutcome::Message(message) => message,
+            ReceiveOutcome::Shutdown => {
                 println!("Shutdown requested; notification consumer stopped");
                 break;
-            },
-            message = consumer.recv() => message?,
+            }
         };
 
-        let parsed_record = match message.payload() {
-            Some(payload) => parse_record(payload),
-            None => ParsedRecord::Skip {
-                event_id: None,
-                event_type: None,
-                reason: "Kafka record has no payload".to_owned(),
-            },
+        let parsed_record = match payload_or_skip(message.payload()) {
+            Ok(payload) => parse_record(payload),
+            Err(skipped) => ParsedRecord::Skip(skipped),
         };
         let event = match parsed_record {
-            ParsedRecord::LifecycleEvent(event) => event,
-            ParsedRecord::Skip {
-                event_id,
-                event_type,
-                reason,
-            } => {
-                commit_skipped_record(
-                    &consumer,
-                    &message,
-                    event_id,
-                    event_type.as_deref(),
-                    &reason,
-                )?;
+            ParsedRecord::Event(event) => event,
+            ParsedRecord::Skip(skipped) => {
+                commit_skipped_record(&consumer, &message, &skipped)?;
                 continue;
             }
         };
 
-        let retry_started = Instant::now();
-        let mut retry_delay = RETRY_START;
-        let outcome = 'process_event: loop {
-            let remaining = MAX_RETRY_DURATION.saturating_sub(retry_started.elapsed());
-            if remaining.is_zero() {
-                eprintln!(
-                    "topic={} partition={} offset={} event_id={} order_id={} event_type={} result=retry_deadline_exceeded",
-                    message.topic(),
-                    message.partition(),
-                    message.offset(),
-                    event.event_id,
-                    event.order_id,
-                    event.event_type
-                );
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "database processing exceeded five minutes for event {}",
-                        event.event_id
-                    ),
-                )
-                .into());
+        let context = EventLogContext {
+            topic: message.topic().to_owned(),
+            partition: message.partition(),
+            offset: message.offset(),
+            event_id: event.event_id,
+            order_id: event.order_id,
+            event_type: Some(event.event_type.clone()),
+        };
+        let outcome = match retry_database_operation(
+            &context,
+            &mut shutdown_signal,
+            || process_order_lifecycle_event(&pool, &event),
+            |error| matches!(error, NotificationProcessError::InvalidEvent(_)),
+        )
+        .await?
+        {
+            RetryOutcome::Success(outcome) => outcome,
+            RetryOutcome::Invalid(skipped) => {
+                commit_skipped_record(&consumer, &message, &skipped)?;
+                continue 'message_loop;
             }
-
-            let processing =
-                tokio::time::timeout(remaining, process_order_lifecycle_event(&pool, &event)).await;
-            match processing {
-                Ok(Ok(outcome)) => break 'process_event outcome,
-                Ok(Err(error @ NotificationProcessError::InvalidEvent(_))) => {
-                    commit_skipped_record(
-                        &consumer,
-                        &message,
-                        Some(event.event_id),
-                        Some(&event.event_type),
-                        &error.to_string(),
-                    )?;
-                    continue 'message_loop;
-                }
-                Ok(Err(error @ NotificationProcessError::Database(_))) => {
-                    if retry_started.elapsed() >= MAX_RETRY_DURATION {
-                        return Err(Box::new(error) as Box<dyn Error>);
-                    }
-                    let remaining = MAX_RETRY_DURATION.saturating_sub(retry_started.elapsed());
-                    let wait = retry_delay.min(remaining);
-                    eprintln!(
-                        "topic={} partition={} offset={} event_id={} order_id={} event_type={} result=retry_database_error error={error:?} retry_in_ms={}",
-                        message.topic(),
-                        message.partition(),
-                        message.offset(),
-                        event.event_id,
-                        event.order_id,
-                        event.event_type,
-                        wait.as_millis()
-                    );
-                    tokio::select! {
-                        biased;
-                        signal_result = &mut shutdown_signal => {
-                            signal_result?;
-                            println!("Shutdown requested; current event remains uncommitted");
-                            return Ok(());
-                        },
-                        _ = sleep(wait) => {}
-                    }
-                    retry_delay = retry_delay.saturating_mul(2).min(RETRY_MAX);
-                }
-                Err(_) => {
-                    eprintln!(
-                        "topic={} partition={} offset={} event_id={} order_id={} event_type={} result=retry_deadline_exceeded",
-                        message.topic(),
-                        message.partition(),
-                        message.offset(),
-                        event.event_id,
-                        event.order_id,
-                        event.event_type
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!(
-                            "database processing exceeded five minutes for event {}",
-                            event.event_id
-                        ),
-                    )
-                    .into());
-                }
-            }
+            RetryOutcome::Shutdown => return Ok(()),
         };
 
         consumer.commit_message(&message, CommitMode::Sync)?;
@@ -214,66 +107,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parse_record(payload: &[u8]) -> ParsedRecord {
-    let header: EventHeader = match serde_json::from_slice(payload) {
-        Ok(header) => header,
-        Err(error) => {
-            return ParsedRecord::Skip {
-                event_id: None,
-                event_type: None,
-                reason: format!("malformed event envelope: {error}"),
-            };
-        }
-    };
-
-    if header.schema_version != 1 {
-        return ParsedRecord::Skip {
-            event_id: Some(header.event_id),
-            event_type: Some(header.event_type),
-            reason: format!("unsupported schema version {}", header.schema_version),
-        };
-    }
-
-    if !matches!(
-        header.event_type.as_str(),
-        "OrderAccepted" | "OrderRejected" | "OrderShipped"
-    ) {
-        let reason = if header.event_type == "OrderCreated" {
-            "known event type is not handled by the notifications consumer".to_owned()
-        } else {
-            "unknown event type".to_owned()
-        };
-        return ParsedRecord::Skip {
-            event_id: Some(header.event_id),
-            event_type: Some(header.event_type),
-            reason,
-        };
-    }
-
-    match serde_json::from_slice(payload) {
-        Ok(event) => ParsedRecord::LifecycleEvent(event),
-        Err(error) => ParsedRecord::Skip {
-            event_id: Some(header.event_id),
-            event_type: Some(header.event_type),
-            reason: format!("malformed order lifecycle payload: {error}"),
+fn parse_record(payload: &[u8]) -> ParsedRecord<OrderLifecycleEvent> {
+    parse_event_record(
+        payload,
+        EventSpec {
+            handled_types: &["OrderAccepted", "OrderRejected", "OrderShipped"],
+            all_known_types: &[
+                "OrderCreated",
+                "OrderAccepted",
+                "OrderRejected",
+                "OrderShipped",
+            ],
+            consumer_name: "notifications",
+            payload_name: "order lifecycle",
         },
-    }
-}
-
-fn commit_skipped_record(
-    consumer: &StreamConsumer,
-    message: &BorrowedMessage<'_>,
-    event_id: Option<Uuid>,
-    event_type: Option<&str>,
-    reason: &str,
-) -> Result<(), rdkafka::error::KafkaError> {
-    eprintln!(
-        "topic={} partition={} offset={} event_id={} event_type={} result=skipped reason={reason:?}",
-        message.topic(),
-        message.partition(),
-        message.offset(),
-        event_id.map_or_else(|| "unknown".to_owned(), |id| id.to_string()),
-        event_type.unwrap_or("unknown")
-    );
-    consumer.commit_message(message, CommitMode::Sync)
+    )
 }

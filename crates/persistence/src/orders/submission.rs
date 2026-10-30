@@ -37,7 +37,7 @@ pub async fn submit_order(
 
     let mut transaction = pool.begin().await?;
 
-    if !lock_customer(&mut *transaction, request.customer_id()).await? {
+    if !lock_customer(&mut transaction, request.customer_id()).await? {
         return Err(PersistenceError::CustomerNotFound);
     }
 
@@ -46,7 +46,7 @@ pub async fn submit_order(
         .iter()
         .map(|item| item.product_id())
         .collect::<Vec<_>>();
-    let product_prices = lock_active_product_prices(&mut *transaction, &product_ids).await?;
+    let product_prices = lock_active_product_prices(&mut transaction, &product_ids).await?;
     let active_prices: HashMap<Uuid, i64> = product_prices
         .into_iter()
         .map(|product| (product.id, product.price_cents))
@@ -63,7 +63,7 @@ pub async fn submit_order(
     let priced_order = price_order(request, &active_prices)?;
     let order_id = Uuid::new_v4();
     let inserted_order = insert_pending_order(
-        &mut *transaction,
+        &mut transaction,
         order_id,
         request.customer_id(),
         priced_order.total_cents,
@@ -74,7 +74,7 @@ pub async fn submit_order(
 
     let Some((order_id, status)) = inserted_order else {
         let existing = find_existing_order_in_transaction(
-            &mut *transaction,
+            &mut transaction,
             request.customer_id(),
             idempotency_key,
         )
@@ -86,8 +86,8 @@ pub async fn submit_order(
         return Ok(result);
     };
 
-    insert_order_items(&mut *transaction, order_id, &priced_order.items).await?;
-    enqueue_order_created(&mut *transaction, Uuid::new_v4(), order_id, request).await?;
+    insert_order_items(&mut transaction, order_id, &priced_order.items).await?;
+    enqueue_order_created(&mut transaction, Uuid::new_v4(), order_id, request).await?;
 
     transaction.commit().await?;
 
