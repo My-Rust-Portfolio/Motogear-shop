@@ -44,15 +44,36 @@ version request. To confirm topic initialization, run:
 docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --describe --topic shop.orders.v1
 ```
 
-This verifies the topic metadata, not successful order publishing. The
-publisher will exercise writes in a later step. The broker uses plaintext and
-is published only on loopback for local development; it has no Kafka
-credentials. The replication factors of one are specific to this single
-broker and are not production settings. A single local broker is not highly
-available.
+This verifies the topic metadata, not successful order publishing. The broker
+uses plaintext and is published only on loopback for local development; it has
+no Kafka credentials. The replication factors of one are specific to this
+single broker and are not production settings. A single local broker is not
+highly available.
 
-The outbox is not published yet, so new orders still remain pending. The next
-worker slice will connect the publisher to this broker.
+## Run the outbox publisher
+
+After applying migrations, start the publisher in a separate terminal:
+
+```powershell
+cargo run -p motogear-workers
+```
+
+It reads the oldest unpublished outbox row, sends its stored payload to the
+stored Kafka topic and key, and marks the row published only after Kafka
+acknowledges the message. It retries failures and records the attempt count and
+last error in PostgreSQL. Run one publisher process for now so it reads and
+submits events in outbox sequence order. Kafka preserves order within a
+partition; the event key keeps messages for the same order together. This
+provides at-least-once delivery: if Kafka accepts a message and the worker
+stops before updating PostgreSQL, a restart can send that message again.
+The worker logs event ID, order ID, topic, attempt number, result, and attempt
+duration as key-value fields. Press Ctrl+C to stop; an active delivery is
+allowed to finish before the worker exits. A future Kafka consumer must insert
+`(consumer_name, event_id)` into `processed_events` in the same transaction as
+its database effects and skip the event if that key already exists.
+
+The publisher only moves events to Kafka; orders remain pending until a later
+worker handles inventory and order status.
 
 ## Seed demo data
 
@@ -144,4 +165,5 @@ cargo test -p motogear-persistence
 Database-backed tests create a uniquely named schema, apply the real migrations
 and seed data there, and drop that schema when the test finishes. They do not
 change the database's `public` schema. Persistence tests cover order submission,
-idempotency, purchase-time prices, outbox atomicity, and concurrent retries.
+idempotency, purchase-time prices, outbox atomicity and publishing state
+transitions, and concurrent retries.

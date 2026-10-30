@@ -5,6 +5,9 @@ use motogear_domain::orders::{
 };
 use motogear_persistence::{
     PgPool,
+    events::outbox::{
+        mark_outbox_event_published, next_unpublished_event, record_outbox_publish_failure,
+    },
     orders::{OrderSubmissionError, submit_order},
     run_migrations,
     seed::seed_demo_data,
@@ -156,6 +159,65 @@ async fn valid_submission_creates_pending_order_items_and_outbox_event() {
         event.0["data"]["items"][0]["product_id"],
         product.to_string()
     );
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn outbox_publisher_state_transitions_are_recorded() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let product = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let order = submit_order(
+        &database.pool,
+        &valid_request(customer, product, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+
+    let event = next_unpublished_event(&database.pool)
+        .await
+        .expect("outbox query should succeed")
+        .expect("created order should have an unpublished event");
+    assert_eq!(event.aggregate_id, order.order_id);
+    assert_eq!(event.publish_attempts, 0);
+
+    assert!(
+        record_outbox_publish_failure(&database.pool, event.event_id, "broker unavailable")
+            .await
+            .expect("failure details should be recorded")
+    );
+    let event_after_failure = next_unpublished_event(&database.pool)
+        .await
+        .expect("outbox query should succeed after a failed attempt")
+        .expect("failed event should remain unpublished");
+    assert_eq!(event_after_failure.event_id, event.event_id);
+    assert_eq!(event_after_failure.publish_attempts, 1);
+
+    assert!(
+        mark_outbox_event_published(&database.pool, event.event_id)
+            .await
+            .expect("published event should be marked")
+    );
+    assert!(
+        next_unpublished_event(&database.pool)
+            .await
+            .expect("outbox query should succeed after publishing")
+            .is_none(),
+        "published events should no longer be selected"
+    );
+
+    let (published, attempts): (bool, i32) = query_as(
+        "SELECT published_at IS NOT NULL, publish_attempts \
+         FROM outbox_events WHERE event_id = $1",
+    )
+    .bind(event.event_id)
+    .fetch_one(&database.pool)
+    .await
+    .expect("outbox row should remain available for inspection");
+    assert!(published);
+    assert_eq!(attempts, 1);
+
     database.cleanup().await;
 }
 
