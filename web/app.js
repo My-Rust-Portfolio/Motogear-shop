@@ -10,6 +10,9 @@ const catalogueRefresh = document.querySelector("#catalogue-refresh");
 const ordersRefresh = document.querySelector("#orders-refresh");
 const ordersContainer = document.querySelector("#orders-list");
 const ordersEmptyState = document.querySelector("#orders-empty");
+const notificationsRefresh = document.querySelector("#notifications-refresh");
+const notificationsContainer = document.querySelector("#notifications-list");
+const notificationsEmptyState = document.querySelector("#notifications-empty");
 const productsContainer = document.querySelector("#products");
 const emptyState = document.querySelector("#empty-state");
 const cartCount = document.querySelector("#cart-count");
@@ -35,6 +38,10 @@ let ordersRequestInFlight = false;
 let ordersRefreshQueued = false;
 let ordersGeneration = 0;
 let hasOrdersSnapshot = false;
+let notificationsRequestInFlight = false;
+let notificationsRefreshQueued = false;
+let notificationsGeneration = 0;
+let hasNotificationsSnapshot = false;
 const cart = new Map();
 const quantityChoices = new Map();
 let pendingCheckout = readPendingCheckout();
@@ -106,6 +113,19 @@ function isOrder(value) {
     && Array.isArray(value.items)
     && value.items.length > 0
     && value.items.every(isOrderItem);
+}
+
+function isNotification(value) {
+  return value !== null
+    && typeof value === "object"
+    && isUuid(value.id)
+    && isUuid(value.order_id)
+    && typeof value.kind === "string"
+    && value.kind.trim().length > 0
+    && typeof value.message === "string"
+    && value.message.trim().length > 0
+    && typeof value.created_at === "string"
+    && Number.isFinite(Date.parse(value.created_at));
 }
 
 function orderIdFromLocation(location) {
@@ -306,6 +326,7 @@ async function loadCustomers() {
     customerStatus.textContent = "Checkout uses this customer; choice is saved for this tab.";
     updateCheckoutControls();
     refreshOrders(true);
+    refreshNotifications(true);
   } catch (error) {
     customerSelect.replaceChildren();
     const option = document.createElement("option");
@@ -474,6 +495,36 @@ function renderOrders(orders) {
   ordersContainer.replaceChildren(fragment);
   ordersEmptyState.hidden = orders.length !== 0;
   ordersContainer.hidden = orders.length === 0;
+}
+
+function createNotificationCard(notification) {
+  const card = document.createElement("article");
+  card.className = "notification-card";
+
+  const heading = document.createElement("div");
+  heading.className = "notification-heading";
+  const kind = document.createElement("span");
+  kind.className = "notification-kind";
+  kind.textContent = notification.kind;
+  const createdAt = document.createElement("time");
+  createdAt.className = "notification-created";
+  createdAt.dateTime = notification.created_at;
+  createdAt.textContent = new Date(notification.created_at).toLocaleString();
+  heading.append(kind, createdAt);
+
+  const message = document.createElement("p");
+  message.className = "notification-message";
+  message.textContent = notification.message;
+  card.append(heading, message);
+  return card;
+}
+
+function renderNotifications(notifications) {
+  const fragment = document.createDocumentFragment();
+  for (const notification of notifications) fragment.append(createNotificationCard(notification));
+  notificationsContainer.replaceChildren(fragment);
+  notificationsEmptyState.hidden = notifications.length !== 0;
+  notificationsContainer.hidden = notifications.length === 0;
 }
 
 function renderCart() {
@@ -668,6 +719,55 @@ async function refreshOrders(force = false) {
   }
 }
 
+async function refreshNotifications(force = false) {
+  if (document.hidden) return;
+  const customerId = customerSelect.value;
+  if (!isUuid(customerId)) return;
+  if (notificationsRequestInFlight) {
+    if (force) notificationsRefreshQueued = true;
+    return;
+  }
+
+  notificationsRequestInFlight = true;
+  notificationsRefreshQueued = false;
+  const generation = notificationsGeneration;
+  notificationsContainer.setAttribute("aria-busy", "true");
+  if (!hasNotificationsSnapshot) notificationsRefresh.textContent = "Loading notifications…";
+
+  try {
+    const notifications = await fetchJson(
+      `/api/v1/customers/${encodeURIComponent(customerId)}/notifications?limit=20&offset=0`,
+      "notifications",
+    );
+    if (!Array.isArray(notifications) || !notifications.every(isNotification)) {
+      throw new ApiRequestError("The API returned an invalid notification list.");
+    }
+    if (generation !== notificationsGeneration || customerId !== customerSelect.value) return;
+
+    renderNotifications(notifications);
+    hasNotificationsSnapshot = true;
+    notificationsRefresh.textContent = `Updated at ${formatRefreshTime(new Date())}`;
+  } catch (error) {
+    if (generation !== notificationsGeneration || customerId !== customerSelect.value) return;
+    const reason = error instanceof Error ? error.message : "Notifications could not be loaded.";
+    notificationsRefresh.textContent = hasNotificationsSnapshot
+      ? `Refresh failed: ${reason} Showing the previous notifications.`
+      : `Notifications could not be loaded: ${reason}`;
+    if (!hasNotificationsSnapshot) {
+      notificationsContainer.textContent = "Notifications are temporarily unavailable.";
+    }
+  } finally {
+    notificationsRequestInFlight = false;
+    if (generation === notificationsGeneration) {
+      notificationsContainer.setAttribute("aria-busy", "false");
+    }
+    if (notificationsRefreshQueued && !document.hidden) {
+      notificationsRefreshQueued = false;
+      refreshNotifications(true);
+    }
+  }
+}
+
 function createPendingCheckout() {
   const request = {
     customer_id: customerSelect.value,
@@ -788,6 +888,7 @@ async function submitCheckout() {
       setCheckoutStatus(`Order ${orderId} was submitted and is ${confirmedOrder.status}.`, "success");
       renderCart();
       refreshOrders(true);
+      refreshNotifications(true);
       return;
     }
 
@@ -826,12 +927,19 @@ async function submitCheckout() {
 customerSelect.addEventListener("change", () => {
   saveCustomerId(customerSelect.value);
   ordersGeneration += 1;
+  notificationsGeneration += 1;
   hasOrdersSnapshot = false;
+  hasNotificationsSnapshot = false;
   ordersContainer.replaceChildren();
   ordersContainer.hidden = false;
   ordersEmptyState.hidden = true;
   ordersRefresh.textContent = "Loading orders…";
+  notificationsContainer.replaceChildren();
+  notificationsContainer.hidden = false;
+  notificationsEmptyState.hidden = true;
+  notificationsRefresh.textContent = "Loading notifications…";
   refreshOrders(true);
+  refreshNotifications(true);
   setCheckoutStatus("");
 });
 checkoutButton.addEventListener("click", submitCheckout);
@@ -839,6 +947,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     refreshProducts();
     refreshOrders(true);
+    refreshNotifications(true);
   }
 });
 
@@ -855,4 +964,5 @@ refreshProducts();
 window.setInterval(() => {
   refreshProducts();
   refreshOrders();
+  refreshNotifications();
 }, PRODUCT_POLL_INTERVAL_MS);

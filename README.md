@@ -127,6 +127,23 @@ after logging them, matching the current inventory worker policy. Durable
 quarantine is a later phase. The shipment is simulated; no carrier or external
 shipping service is contacted.
 
+## Run the notifications consumer
+
+In another terminal, start the notifications worker:
+
+```powershell
+cargo run -p motogear-workers --bin notifications
+```
+
+It consumes `OrderAccepted`, `OrderRejected`, and `OrderShipped` events as group
+`motogear-notifications-v1`. For each event it inserts a short customer-facing
+message into `notifications` and records the processed-event marker in the same
+transaction. A duplicate Kafka delivery creates no duplicate notification.
+The API lists the selected customer's newest notifications, and the browser
+refreshes that panel while the tab is visible. As with the other consumers,
+malformed, unsupported-version, and unrelated records are logged and committed;
+durable quarantine is not implemented yet.
+
 ## Seed demo data
 
 After applying the migrations, insert the fictional customers and products:
@@ -170,6 +187,9 @@ The read-only catalogue endpoints are:
 - `GET /api/v1/products?limit=20&offset=0` — active products, ordered by SKU.
   `limit` defaults to 20 and must be between 1 and 100; `offset` defaults to 0
   and may not exceed 100000. Product prices are returned as integer EUR cents.
+- `GET /api/v1/customers/{customer_id}/notifications?limit=20&offset=0` — newest
+  customer-facing order lifecycle messages, ordered newest first. It uses the
+  same bounded pagination rules.
 
 For example, in PowerShell:
 
@@ -199,6 +219,8 @@ selected customer's latest 20 orders and refreshes their status while the tab
 is open. After checkout, it reads the returned order details before clearing
 the saved retry request; if the POST response is unclear, the same idempotent
 retry key can recover the order ID and the detail endpoint confirms the result.
+The notifications panel lists accepted, rejected, and shipped updates for the
+selected customer and refreshes on the same visible-tab polling schedule.
 
 ```http
 POST /api/v1/orders
@@ -230,8 +252,10 @@ and seed data there, and drop that schema when the test finishes. They do not
 change the database's `public` schema. Persistence tests cover order submission,
 idempotency, purchase-time prices, outbox atomicity and publishing state
 transitions, inventory acceptance/rejection, fulfillment shipment creation and
-deduplication, rollback, concurrent duplicate processing, and order detail/history
-responses including status changes, rejection reasons, and shipment data.
+deduplication, notification creation for accepted/rejected/shipped events,
+notification validation and concurrency, rollback, and order detail/history
+responses including status changes, rejection reasons, and shipment data. API
+tests also cover paginated customer notification history and its error cases.
 
 The real Kafka-to-PostgreSQL order lifecycle pipeline test is ignored during
 ordinary test runs because it requires the local broker and `TEST_DATABASE_URL`.

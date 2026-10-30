@@ -1,5 +1,6 @@
 mod catalogue;
 mod health;
+mod notifications;
 mod orders;
 
 pub use orders::MAX_ORDER_REQUEST_BYTES;
@@ -14,6 +15,7 @@ pub(crate) fn build_router(pool: PgPool) -> Router {
     Router::<AppState>::new()
         .merge(health::router())
         .merge(catalogue::router())
+        .merge(notifications::router())
         .merge(orders::router())
         .route_service("/", ServeFile::new("web/index.html"))
         .nest_service("/static", ServeDir::new("web"))

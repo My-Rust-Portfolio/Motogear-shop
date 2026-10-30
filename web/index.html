@@ -93,6 +93,18 @@
             <div id="orders-list" class="order-list" aria-live="polite" aria-busy="true"></div>
           </section>
 
+          <section class="orders-panel notifications-panel" aria-labelledby="notifications-title">
+            <div class="section-heading orders-heading">
+              <div>
+                <p class="eyebrow">SHOP UPDATES</p>
+                <h2 id="notifications-title">Notifications</h2>
+              </div>
+              <p id="notifications-refresh" class="refresh-status" aria-live="polite">Waiting for customer…</p>
+            </div>
+            <p id="notifications-empty" class="orders-empty" hidden>No notifications for this customer yet.</p>
+            <div id="notifications-list" class="notification-list" aria-live="polite" aria-busy="true"></div>
+          </section>
+
           <div id="products" class="product-grid" aria-live="polite" aria-busy="true"></div>
           <p id="empty-state" class="empty-state" hidden>No active products are available right now.</p>
           <p class="catalogue-note">Stock is shared with other shop windows and may change as orders are processed.</p>

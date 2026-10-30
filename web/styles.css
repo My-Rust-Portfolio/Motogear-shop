@@ -202,6 +202,12 @@ button, select { font: inherit; }
 .order-rejection, .order-tracking { margin: 9px 0 0; font-size: 11px; line-height: 1.45; }
 .order-rejection { color: var(--red); }
 .order-tracking { color: var(--green); }
+.notification-list { display: grid; gap: 9px; }
+.notification-card { padding: 12px 14px; border: 1px solid var(--line); border-radius: 9px; background: #fcfcfd; }
+.notification-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.notification-kind { color: var(--navy); font-size: 10px; font-weight: 800; text-transform: capitalize; }
+.notification-created { color: var(--muted); font-size: 10px; }
+.notification-message { margin: 6px 0 0; overflow-wrap: anywhere; color: var(--ink); font-size: 12px; line-height: 1.5; }
 
 .product-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 

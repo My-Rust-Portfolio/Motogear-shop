@@ -5,6 +5,7 @@ pub mod events;
 pub mod fulfillment;
 pub mod inventory;
 pub mod migrations;
+pub mod notifications;
 pub mod orders;
 pub mod seed;
 

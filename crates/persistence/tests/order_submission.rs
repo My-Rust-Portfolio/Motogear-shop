@@ -14,6 +14,10 @@ use motogear_persistence::{
         process_order_accepted,
     },
     inventory::{InventoryOutcome, OrderCreatedEvent, process_order_created},
+    notifications::{
+        NOTIFICATIONS_CONSUMER_NAME, NotificationOutcome, NotificationProcessError,
+        OrderLifecycleEvent, process_order_lifecycle_event,
+    },
     orders::{OrderSubmissionError, submit_order},
     run_migrations,
     seed::seed_demo_data,
@@ -148,6 +152,24 @@ async fn order_accepted_event(pool: &PgPool, order_id: Uuid) -> OrderAcceptedEve
     serde_json::from_value(payload.0).expect("stored event should match the OrderAccepted contract")
 }
 
+async fn order_lifecycle_event(
+    pool: &PgPool,
+    order_id: Uuid,
+    event_type: &str,
+) -> OrderLifecycleEvent {
+    let payload: Json<serde_json::Value> = query_scalar(
+        "SELECT payload FROM outbox_events \
+         WHERE aggregate_id = $1 AND event_type = $2",
+    )
+    .bind(order_id)
+    .bind(event_type)
+    .fetch_one(pool)
+    .await
+    .expect("order lifecycle event should exist");
+
+    serde_json::from_value(payload.0).expect("event should match the lifecycle envelope")
+}
+
 fn accepted_event_for_order_created(event: OrderCreatedEvent) -> OrderAcceptedEvent {
     OrderAcceptedEvent {
         event_id: Uuid::new_v4(),
@@ -237,6 +259,23 @@ async fn count_processed_fulfillment_events(pool: &PgPool, event_id: Uuid) -> i6
         .fetch_one(pool)
         .await
         .expect("fulfillment processed-event count query should succeed")
+}
+
+async fn count_notifications_for_event(pool: &PgPool, event_id: Uuid) -> i64 {
+    query_scalar("SELECT COUNT(*) FROM notifications WHERE source_event_id = $1")
+        .bind(event_id)
+        .fetch_one(pool)
+        .await
+        .expect("notification count query should succeed")
+}
+
+async fn count_processed_notification_events(pool: &PgPool, event_id: Uuid) -> i64 {
+    query_scalar("SELECT COUNT(*) FROM processed_events WHERE consumer_name = $1 AND event_id = $2")
+        .bind(NOTIFICATIONS_CONSUMER_NAME)
+        .bind(event_id)
+        .fetch_one(pool)
+        .await
+        .expect("notification processed-event count query should succeed")
 }
 
 #[tokio::test]
@@ -1383,6 +1422,232 @@ async fn concurrent_duplicate_fulfillment_events_create_one_shipment_and_event()
     assert_eq!(shipment_count, 1);
     assert_eq!(
         count_order_events(&database.pool, order_id, "OrderShipped").await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn accepted_event_creates_customer_notification() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, _) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    let event = order_lifecycle_event(&database.pool, order_id, "OrderAccepted").await;
+
+    assert_eq!(
+        process_order_lifecycle_event(&database.pool, &event)
+            .await
+            .expect("accepted event should create a notification"),
+        NotificationOutcome::Created {
+            kind: "accepted".to_owned()
+        }
+    );
+    let (kind, message): (String, String) =
+        query_as("SELECT kind, message FROM notifications WHERE source_event_id = $1")
+            .bind(event.event_id)
+            .fetch_one(&database.pool)
+            .await
+            .expect("accepted notification should be queryable");
+    assert_eq!(kind, "accepted");
+    assert!(message.contains("was accepted"));
+    assert_eq!(
+        count_processed_notification_events(&database.pool, event.event_id).await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn rejected_event_creates_notification_with_rejection_reason() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let submitted = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 4),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("order submission should succeed");
+    let created = order_created_event(&database.pool, submitted.order_id).await;
+    assert!(matches!(
+        process_order_created(&database.pool, &created)
+            .await
+            .expect("insufficient stock should reject the order"),
+        InventoryOutcome::Rejected { .. }
+    ));
+    let event = order_lifecycle_event(&database.pool, submitted.order_id, "OrderRejected").await;
+
+    assert_eq!(
+        process_order_lifecycle_event(&database.pool, &event)
+            .await
+            .expect("rejected event should create a notification"),
+        NotificationOutcome::Created {
+            kind: "rejected".to_owned()
+        }
+    );
+    let message: String =
+        query_scalar("SELECT message FROM notifications WHERE source_event_id = $1")
+            .bind(event.event_id)
+            .fetch_one(&database.pool)
+            .await
+            .expect("rejection notification should be queryable");
+    assert!(message.contains("was rejected"));
+    assert!(message.contains("Insufficient stock"));
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn shipped_event_creates_notification_with_simulated_tracking_and_eur_total() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, accepted) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    process_order_accepted(&database.pool, &accepted)
+        .await
+        .expect("accepted order should ship");
+    let event = order_lifecycle_event(&database.pool, order_id, "OrderShipped").await;
+
+    assert_eq!(
+        process_order_lifecycle_event(&database.pool, &event)
+            .await
+            .expect("shipped event should create a notification"),
+        NotificationOutcome::Created {
+            kind: "shipped".to_owned()
+        }
+    );
+    let message: String =
+        query_scalar("SELECT message FROM notifications WHERE source_event_id = $1")
+            .bind(event.event_id)
+            .fetch_one(&database.pool)
+            .await
+            .expect("shipping notification should be queryable");
+    assert!(message.contains("Simulated tracking reference: SIM-"));
+    assert!(message.contains("Order value: EUR 149.00"));
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn duplicate_notification_event_creates_only_one_row() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, _) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    let event = order_lifecycle_event(&database.pool, order_id, "OrderAccepted").await;
+
+    process_order_lifecycle_event(&database.pool, &event)
+        .await
+        .expect("first delivery should create a notification");
+    assert_eq!(
+        process_order_lifecycle_event(&database.pool, &event)
+            .await
+            .expect("duplicate should be a safe no-op"),
+        NotificationOutcome::Duplicate
+    );
+    assert_eq!(
+        count_notifications_for_event(&database.pool, event.event_id).await,
+        1
+    );
+    assert_eq!(
+        count_processed_notification_events(&database.pool, event.event_id).await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn mismatched_notification_customer_rolls_back_processed_marker() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let other_customer: Uuid =
+        query_scalar("SELECT id FROM customers WHERE email = 'bob@example.test'")
+            .fetch_one(&database.pool)
+            .await
+            .expect("second seeded customer should exist");
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, _) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    let mut event = order_lifecycle_event(&database.pool, order_id, "OrderAccepted").await;
+    event.data["customer_id"] = serde_json::json!(other_customer);
+
+    assert!(matches!(
+        process_order_lifecycle_event(&database.pool, &event).await,
+        Err(NotificationProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(
+        count_notifications_for_event(&database.pool, event.event_id).await,
+        0
+    );
+    assert_eq!(
+        count_processed_notification_events(&database.pool, event.event_id).await,
+        0
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn invalid_notification_payload_rolls_back_without_notification() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, _) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    let mut event = order_lifecycle_event(&database.pool, order_id, "OrderAccepted").await;
+    event.data["items"][0]["quantity"] = serde_json::json!(0);
+
+    assert!(matches!(
+        process_order_lifecycle_event(&database.pool, &event).await,
+        Err(NotificationProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(
+        count_notifications_for_event(&database.pool, event.event_id).await,
+        0
+    );
+    assert_eq!(
+        count_processed_notification_events(&database.pool, event.event_id).await,
+        0
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_notification_events_create_one_row() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, _) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    let event = order_lifecycle_event(&database.pool, order_id, "OrderAccepted").await;
+
+    let (first, second) = tokio::join!(
+        process_order_lifecycle_event(&database.pool, &event),
+        process_order_lifecycle_event(&database.pool, &event),
+    );
+    let outcomes = [
+        first.expect("first concurrent delivery should succeed"),
+        second.expect("second concurrent delivery should succeed"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, NotificationOutcome::Created { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, NotificationOutcome::Duplicate))
+            .count(),
+        1
+    );
+    assert_eq!(
+        count_notifications_for_event(&database.pool, event.event_id).await,
         1
     );
 
