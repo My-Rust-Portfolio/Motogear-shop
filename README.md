@@ -7,10 +7,10 @@ It reads the PostgreSQL credentials from the ignored `.env` file and is safe to
 run again: SQLx records which migrations have already been applied.
 
 1. Copy `.env.example` to `.env` and set a local PostgreSQL password.
-2. Start the PostgreSQL service:
+2. Start PostgreSQL, the local Kafka broker, and its topic initializer:
 
    ```powershell
-   docker compose up -d postgres
+   docker compose up -d postgres kafka-init
    ```
 
 3. Apply the migrations:
@@ -22,6 +22,37 @@ run again: SQLx records which migrations have already been applied.
 For a PostgreSQL server running somewhere else, set `POSTGRES_HOST` and
 `POSTGRES_PORT` in `.env`. The defaults target the Compose service from the
 Windows host (`127.0.0.1:5433`).
+
+The Compose Kafka broker uses the pinned Apache image `apache/kafka:4.4.0` in
+single-node KRaft mode. The version is pinned to make the local broker
+reproducible and to avoid following a moving `latest` tag. Version 4.4.0 is
+Apache's documented official JVM image and is the pinned baseline for this
+local KRaft setup. When adding a Rust Kafka client, check its protocol
+compatibility against this broker version. See the [Apache Kafka Docker
+guide](https://kafka.apache.org/44/getting-started/docker/).
+
+The `kafka-init` service creates the topic named by `KAFKA_ORDERS_TOPIC`
+(`shop.orders.v1` by default), with three partitions and replication factor
+one. Kafka retains events for seven days in the `kafka_data` volume. Host-run
+workers use `KAFKA_BROKERS=localhost:9092`; Compose containers use
+`KAFKA_BROKERS_DOCKER=kafka:19092`.
+
+The Compose health check only verifies that the broker responds to an API
+version request. To confirm topic initialization, run:
+
+```powershell
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:19092 --describe --topic shop.orders.v1
+```
+
+This verifies the topic metadata, not successful order publishing. The
+publisher will exercise writes in a later step. The broker uses plaintext and
+is published only on loopback for local development; it has no Kafka
+credentials. The replication factors of one are specific to this single
+broker and are not production settings. A single local broker is not highly
+available.
+
+The outbox is not published yet, so new orders still remain pending. The next
+worker slice will connect the publisher to this broker.
 
 ## Seed demo data
 
