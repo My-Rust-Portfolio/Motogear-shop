@@ -1,6 +1,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::PersistenceError;
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct ProductRecord {
     pub id: Uuid,
@@ -17,7 +19,7 @@ pub async fn list_active_products(
     pool: &PgPool,
     limit: u32,
     offset: u32,
-) -> Result<Vec<ProductRecord>, sqlx::Error> {
+) -> Result<Vec<ProductRecord>, PersistenceError> {
     sqlx::query_as(
         "SELECT id, sku, name, description, price_cents, stock_available \
          FROM products \
@@ -29,4 +31,5 @@ pub async fn list_active_products(
     .bind(i64::from(offset))
     .fetch_all(pool)
     .await
+    .map_err(PersistenceError::from)
 }

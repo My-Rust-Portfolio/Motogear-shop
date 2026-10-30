@@ -1,6 +1,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::PersistenceError;
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct CustomerRecord {
     pub id: Uuid,
@@ -13,7 +15,7 @@ pub async fn list_customers(
     pool: &PgPool,
     limit: u32,
     offset: u32,
-) -> Result<Vec<CustomerRecord>, sqlx::Error> {
+) -> Result<Vec<CustomerRecord>, PersistenceError> {
     sqlx::query_as(
         "SELECT id, name, email \
          FROM customers \
@@ -24,4 +26,5 @@ pub async fn list_customers(
     .bind(i64::from(offset))
     .fetch_all(pool)
     .await
+    .map_err(PersistenceError::from)
 }

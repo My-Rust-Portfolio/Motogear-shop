@@ -7,20 +7,24 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
 };
 
+use crate::error::PersistenceError;
+
 /// Opens a PostgreSQL connection pool from a connection URL.
-pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
+pub async fn connect(database_url: &str) -> Result<PgPool, PersistenceError> {
     PgPoolOptions::new()
         .max_connections(10)
         .connect(database_url)
         .await
+        .map_err(PersistenceError::from)
 }
 
 /// Opens a PostgreSQL pool from structured connection settings.
-pub async fn connect_with(options: PgConnectOptions) -> Result<PgPool, sqlx::Error> {
+pub async fn connect_with(options: PgConnectOptions) -> Result<PgPool, PersistenceError> {
     PgPoolOptions::new()
         .max_connections(10)
         .connect_with(options)
         .await
+        .map_err(PersistenceError::from)
 }
 
 /// Builds PostgreSQL connection options from the Compose-compatible environment.

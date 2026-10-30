@@ -1,5 +1,7 @@
 use sqlx::PgPool;
 
+use crate::PersistenceError;
+
 const CUSTOMERS: &[(&str, &str)] = &[
     ("Alice Morgan", "alice@example.test"),
     ("Bob Nguyen", "bob@example.test"),
@@ -75,7 +77,7 @@ pub struct SeedSummary {
 ///
 /// Product conflicts are ignored by SKU, so running this after orders have
 /// consumed stock never restores the original seed quantity.
-pub async fn seed_demo_data(pool: &PgPool) -> Result<SeedSummary, sqlx::Error> {
+pub async fn seed_demo_data(pool: &PgPool) -> Result<SeedSummary, PersistenceError> {
     let mut transaction = pool.begin().await?;
     let mut summary = SeedSummary::default();
 

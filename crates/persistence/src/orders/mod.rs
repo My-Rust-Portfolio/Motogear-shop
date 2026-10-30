@@ -2,4 +2,5 @@ mod pricing;
 mod repository;
 mod submission;
 
-pub use submission::{OrderSubmission, OrderSubmissionError, submit_order};
+pub use crate::error::PersistenceError as OrderSubmissionError;
+pub use submission::{OrderSubmission, submit_order};

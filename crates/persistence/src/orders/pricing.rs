@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use motogear_domain::{Money, orders::ValidatedOrderRequest};
 use uuid::Uuid;
 
-use super::submission::OrderSubmissionError;
+use crate::error::PersistenceError as OrderSubmissionError;
 
 pub(super) struct PricedItem {
     pub product_id: Uuid,

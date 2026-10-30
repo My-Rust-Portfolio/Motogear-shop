@@ -1,4 +1,6 @@
-use std::{env, error::Error, fmt::Display};
+mod error;
+
+use std::{env, error::Error};
 
 use axum::{
     Json, Router,
@@ -7,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use error::{api_error, database_error_response};
 use motogear_persistence::{
     PgPool,
     catalogue::{CustomerRecord, ProductRecord, list_active_products, list_customers},
@@ -178,36 +181,6 @@ impl From<ProductRecord> for ProductResponse {
             stock_available: record.stock_available,
         }
     }
-}
-
-#[derive(Serialize)]
-struct ErrorEnvelope<'a> {
-    error: ErrorDetails<'a>,
-}
-
-#[derive(Serialize)]
-struct ErrorDetails<'a> {
-    code: &'a str,
-    message: &'a str,
-}
-
-fn api_error(status: StatusCode, code: &str, message: &str) -> Response {
-    (
-        status,
-        Json(ErrorEnvelope {
-            error: ErrorDetails { code, message },
-        }),
-    )
-        .into_response()
-}
-
-fn database_error_response(context: &str, error: impl Display) -> Response {
-    eprintln!("{context}: {error}");
-    api_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "database_unavailable",
-        "The database is temporarily unavailable.",
-    )
 }
 
 #[cfg(test)]
