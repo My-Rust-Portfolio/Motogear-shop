@@ -2,6 +2,7 @@ pub mod catalogue;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod inventory;
 pub mod migrations;
 pub mod orders;
 pub mod seed;

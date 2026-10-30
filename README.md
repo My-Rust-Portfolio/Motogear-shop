@@ -68,12 +68,37 @@ provides at-least-once delivery: if Kafka accepts a message and the worker
 stops before updating PostgreSQL, a restart can send that message again.
 The worker logs event ID, order ID, topic, attempt number, result, and attempt
 duration as key-value fields. Press Ctrl+C to stop; an active delivery is
-allowed to finish before the worker exits. A future Kafka consumer must insert
-`(consumer_name, event_id)` into `processed_events` in the same transaction as
-its database effects and skip the event if that key already exists.
+allowed to finish before the worker exits.
 
-The publisher only moves events to Kafka; orders remain pending until a later
-worker handles inventory and order status.
+The publisher only moves events to Kafka. Orders remain pending until the
+inventory consumer is also running.
+
+## Run the inventory consumer
+
+In another terminal, start the inventory worker:
+
+```powershell
+cargo run -p motogear-workers --bin inventory
+```
+
+It consumes `OrderCreated` events as consumer group
+`motogear-inventory-v1`. In one PostgreSQL transaction, it records the event
+ID, locks the order and products, and either reserves every requested item and
+accepts the order or reserves nothing and rejects it. It writes the resulting
+`OrderAccepted` or `OrderRejected` event to the outbox in that same transaction.
+The Kafka offset is committed only after PostgreSQL commits. If Kafka redelivers
+an event after a crash, `processed_events` prevents applying its inventory
+effects twice. Known event types for other workers are skipped by this group.
+Database failures are retried for up to five minutes with a delay that grows to
+30 seconds. The worker then exits without committing the event so an
+orchestrator can restart it. Ctrl+C waits for an active transaction and offset
+commit; if it arrives during retry backoff, the current event remains
+uncommitted.
+
+Malformed, unsupported-version, unknown-type, and inconsistent events are
+logged with their Kafka location and committed so the group can continue. They
+are not durably quarantined yet, so this consumer group has moved past them;
+quarantine and dead-letter publishing are a later phase.
 
 ## Seed demo data
 
@@ -160,10 +185,20 @@ run:
 ```powershell
 cargo test -p motogear-api
 cargo test -p motogear-persistence
+cargo test -p motogear-workers --bin inventory
 ```
 
 Database-backed tests create a uniquely named schema, apply the real migrations
 and seed data there, and drop that schema when the test finishes. They do not
 change the database's `public` schema. Persistence tests cover order submission,
 idempotency, purchase-time prices, outbox atomicity and publishing state
-transitions, and concurrent retries.
+transitions, inventory acceptance/rejection, duplicate delivery, rollback, and
+concurrent duplicate processing.
+
+The real Kafka-to-PostgreSQL inventory pipeline test is ignored during ordinary
+test runs because it requires the local broker and `TEST_DATABASE_URL`. Run it
+explicitly after starting PostgreSQL and Kafka:
+
+```powershell
+cargo test -p motogear-workers --bin inventory kafka_inventory_pipeline_and_consumer_restart_are_idempotent -- --ignored
+```

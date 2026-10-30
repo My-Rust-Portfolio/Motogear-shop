@@ -8,6 +8,7 @@ use motogear_persistence::{
     events::outbox::{
         mark_outbox_event_published, next_unpublished_event, record_outbox_publish_failure,
     },
+    inventory::{InventoryOutcome, OrderCreatedEvent, process_order_created},
     orders::{OrderSubmissionError, submit_order},
     run_migrations,
     seed::seed_demo_data,
@@ -18,6 +19,8 @@ use sqlx::{
     query, query_as, query_scalar,
     types::Json,
 };
+use std::sync::Arc;
+use tokio::sync::Barrier;
 use uuid::Uuid;
 
 struct TestDatabase {
@@ -112,6 +115,55 @@ async fn count_orders_for_key(pool: &PgPool, customer_id: Uuid, key: Uuid) -> i6
         .fetch_one(pool)
         .await
         .expect("order count query should succeed")
+}
+
+async fn order_created_event(pool: &PgPool, order_id: Uuid) -> OrderCreatedEvent {
+    let payload: Json<serde_json::Value> = query_scalar(
+        "SELECT payload FROM outbox_events \
+         WHERE aggregate_id = $1 AND event_type = 'OrderCreated'",
+    )
+    .bind(order_id)
+    .fetch_one(pool)
+    .await
+    .expect("OrderCreated event should exist");
+
+    serde_json::from_value(payload.0).expect("stored event should match the OrderCreated contract")
+}
+
+async fn stock_available(pool: &PgPool, product_id: Uuid) -> i32 {
+    query_scalar("SELECT stock_available FROM products WHERE id = $1")
+        .bind(product_id)
+        .fetch_one(pool)
+        .await
+        .expect("product stock should be queryable")
+}
+
+async fn count_order_reservations(pool: &PgPool, order_id: Uuid) -> i64 {
+    query_scalar("SELECT COUNT(*) FROM stock_reservations WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(pool)
+        .await
+        .expect("reservation count query should succeed")
+}
+
+async fn count_order_events(pool: &PgPool, order_id: Uuid, event_type: &str) -> i64 {
+    query_scalar("SELECT COUNT(*) FROM outbox_events WHERE aggregate_id = $1 AND event_type = $2")
+        .bind(order_id)
+        .bind(event_type)
+        .fetch_one(pool)
+        .await
+        .expect("outbox event count query should succeed")
+}
+
+async fn count_processed_inventory_events(pool: &PgPool, event_id: Uuid) -> i64 {
+    query_scalar(
+        "SELECT COUNT(*) FROM processed_events \
+         WHERE consumer_name = 'motogear-inventory-v1' AND event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .expect("processed-event count query should succeed")
 }
 
 #[tokio::test]
@@ -217,6 +269,376 @@ async fn outbox_publisher_state_transitions_are_recorded() {
     .expect("outbox row should remain available for inspection");
     assert!(published);
     assert_eq!(attempts, 1);
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn inventory_accepts_order_and_reserves_all_requested_stock() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let gloves = product_id(&database.pool, "GLOVES-ROAD-01").await;
+    let outcome = submit_order(
+        &database.pool,
+        &OrderRequest {
+            customer_id: customer,
+            items: vec![
+                OrderRequestItem {
+                    product_id: helmet,
+                    quantity: 1,
+                },
+                OrderRequestItem {
+                    product_id: gloves,
+                    quantity: 2,
+                },
+            ],
+        }
+        .validate()
+        .expect("valid multi-product request should pass domain validation"),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let event = order_created_event(&database.pool, outcome.order_id).await;
+
+    assert_eq!(
+        process_order_created(&database.pool, &event)
+            .await
+            .expect("inventory processing should succeed"),
+        InventoryOutcome::Accepted
+    );
+    assert_eq!(stock_available(&database.pool, helmet).await, 2);
+    assert_eq!(stock_available(&database.pool, gloves).await, 6);
+    assert_eq!(
+        count_order_reservations(&database.pool, outcome.order_id).await,
+        2
+    );
+    assert_eq!(
+        count_order_events(&database.pool, outcome.order_id, "OrderAccepted").await,
+        1
+    );
+
+    let (status, rejection_reason): (String, Option<String>) =
+        query_as("SELECT status, rejection_reason FROM orders WHERE id = $1")
+            .bind(outcome.order_id)
+            .fetch_one(&database.pool)
+            .await
+            .expect("inventory-updated order should be present");
+    assert_eq!(status, "accepted");
+    assert_eq!(rejection_reason, None);
+    assert_eq!(
+        count_processed_inventory_events(&database.pool, event.event_id).await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn inventory_rejects_short_order_without_partial_stock_changes() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let phone_mount = product_id(&database.pool, "MOUNT-PHONE-01").await;
+    let outcome = submit_order(
+        &database.pool,
+        &OrderRequest {
+            customer_id: customer,
+            items: vec![
+                OrderRequestItem {
+                    product_id: helmet,
+                    quantity: 1,
+                },
+                OrderRequestItem {
+                    product_id: phone_mount,
+                    quantity: 2,
+                },
+            ],
+        }
+        .validate()
+        .expect("valid multi-product request should pass domain validation"),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("order should persist before inventory is checked");
+    let event = order_created_event(&database.pool, outcome.order_id).await;
+
+    let result = process_order_created(&database.pool, &event)
+        .await
+        .expect("stock shortage should be a business rejection");
+    assert!(matches!(result, InventoryOutcome::Rejected { .. }));
+    assert_eq!(stock_available(&database.pool, helmet).await, 3);
+    assert_eq!(stock_available(&database.pool, phone_mount).await, 1);
+    assert_eq!(
+        count_order_reservations(&database.pool, outcome.order_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, outcome.order_id, "OrderRejected").await,
+        1
+    );
+
+    let (status, rejection_reason): (String, Option<String>) =
+        query_as("SELECT status, rejection_reason FROM orders WHERE id = $1")
+            .bind(outcome.order_id)
+            .fetch_one(&database.pool)
+            .await
+            .expect("rejected order should be present");
+    assert_eq!(status, "rejected");
+    assert!(
+        rejection_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains(&phone_mount.to_string()))
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn duplicate_inventory_event_does_not_reserve_stock_twice() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let outcome = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let event = order_created_event(&database.pool, outcome.order_id).await;
+
+    assert_eq!(
+        process_order_created(&database.pool, &event)
+            .await
+            .expect("first processing should succeed"),
+        InventoryOutcome::Accepted
+    );
+    assert_eq!(
+        process_order_created(&database.pool, &event)
+            .await
+            .expect("replayed event should be a safe no-op"),
+        InventoryOutcome::Duplicate
+    );
+    assert_eq!(stock_available(&database.pool, helmet).await, 2);
+    assert_eq!(
+        count_order_reservations(&database.pool, outcome.order_id).await,
+        1
+    );
+    assert_eq!(
+        count_order_events(&database.pool, outcome.order_id, "OrderAccepted").await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn inventory_ignores_order_already_accepted() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let order = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let event = order_created_event(&database.pool, order.order_id).await;
+    query("UPDATE orders SET status = 'accepted' WHERE id = $1")
+        .bind(order.order_id)
+        .execute(&database.pool)
+        .await
+        .expect("test order status should be updated");
+
+    assert_eq!(
+        process_order_created(&database.pool, &event)
+            .await
+            .expect("non-pending order should be ignored"),
+        InventoryOutcome::IgnoredNoLongerPending
+    );
+    assert_eq!(stock_available(&database.pool, helmet).await, 3);
+    assert_eq!(
+        count_order_reservations(&database.pool, order.order_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order.order_id, "OrderAccepted").await,
+        0
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn inventory_ignores_order_already_rejected() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let order = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let event = order_created_event(&database.pool, order.order_id).await;
+    query("UPDATE orders SET status = 'rejected', rejection_reason = 'test' WHERE id = $1")
+        .bind(order.order_id)
+        .execute(&database.pool)
+        .await
+        .expect("test order status should be updated");
+
+    assert_eq!(
+        process_order_created(&database.pool, &event)
+            .await
+            .expect("non-pending order should be ignored"),
+        InventoryOutcome::IgnoredNoLongerPending
+    );
+    assert_eq!(stock_available(&database.pool, helmet).await, 3);
+    assert_eq!(
+        count_order_reservations(&database.pool, order.order_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order.order_id, "OrderAccepted").await,
+        0
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn mismatched_event_items_roll_back_inventory_deduplication_marker() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let order = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let mut event = order_created_event(&database.pool, order.order_id).await;
+    event.data.items[0].quantity = 2;
+
+    assert!(matches!(
+        process_order_created(&database.pool, &event).await,
+        Err(motogear_persistence::inventory::InventoryProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(stock_available(&database.pool, helmet).await, 3);
+    assert_eq!(
+        count_order_reservations(&database.pool, order.order_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order.order_id, "OrderAccepted").await,
+        0
+    );
+    assert_eq!(
+        count_processed_inventory_events(&database.pool, event.event_id).await,
+        0
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn mismatched_event_customer_rolls_back_inventory_deduplication_marker() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let another_customer =
+        query_scalar("SELECT id FROM customers WHERE email = 'bob@example.test'")
+            .fetch_one(&database.pool)
+            .await
+            .expect("second seeded customer should exist");
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let order = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let mut event = order_created_event(&database.pool, order.order_id).await;
+    event.data.customer_id = another_customer;
+
+    assert!(matches!(
+        process_order_created(&database.pool, &event).await,
+        Err(motogear_persistence::inventory::InventoryProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(stock_available(&database.pool, helmet).await, 3);
+    assert_eq!(
+        count_order_reservations(&database.pool, order.order_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order.order_id, "OrderAccepted").await,
+        0
+    );
+    assert_eq!(
+        count_processed_inventory_events(&database.pool, event.event_id).await,
+        0
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_inventory_events_reserve_stock_once() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let order = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("valid order should be saved");
+    let event = order_created_event(&database.pool, order.order_id).await;
+    let barrier = Arc::new(Barrier::new(2));
+
+    let first_pool = database.pool.clone();
+    let first_event = event.clone();
+    let first_barrier = barrier.clone();
+    let first = tokio::spawn(async move {
+        first_barrier.wait().await;
+        process_order_created(&first_pool, &first_event).await
+    });
+
+    let second_pool = database.pool.clone();
+    let second_event = event.clone();
+    let second_barrier = barrier.clone();
+    let second = tokio::spawn(async move {
+        second_barrier.wait().await;
+        process_order_created(&second_pool, &second_event).await
+    });
+
+    let first = first
+        .await
+        .expect("first inventory task should finish")
+        .expect("first task should succeed");
+    let second = second
+        .await
+        .expect("second inventory task should finish")
+        .expect("second task should succeed");
+    assert!(
+        (first == InventoryOutcome::Accepted && second == InventoryOutcome::Duplicate)
+            || (first == InventoryOutcome::Duplicate && second == InventoryOutcome::Accepted)
+    );
+    assert_eq!(stock_available(&database.pool, helmet).await, 2);
+    assert_eq!(
+        count_order_reservations(&database.pool, order.order_id).await,
+        1
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order.order_id, "OrderAccepted").await,
+        1
+    );
 
     database.cleanup().await;
 }

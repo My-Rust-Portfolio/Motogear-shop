@@ -77,16 +77,7 @@ pub(crate) async fn enqueue_order_created(
     order_id: Uuid,
     request: &ValidatedOrderRequest,
 ) -> Result<(), sqlx::Error> {
-    let payload = serde_json::json!({
-        "event_id": event_id.to_string(),
-        "event_type": "OrderCreated",
-        "schema_version": 1,
-        // PostgreSQL supplies the timestamp from this transaction's clock.
-        "occurred_at": serde_json::Value::Null,
-        "order_id": order_id.to_string(),
-        "correlation_id": order_id.to_string(),
-        "causation_id": serde_json::Value::Null,
-        "data": {
+    let data = serde_json::json!({
             "customer_id": request.customer_id().to_string(),
             "items": request.items().iter().map(|item| {
                 serde_json::json!({
@@ -94,9 +85,40 @@ pub(crate) async fn enqueue_order_created(
                     "quantity": item.quantity().get(),
                 })
             }).collect::<Vec<_>>(),
-        },
     });
 
+    enqueue_order_event(
+        connection,
+        event_id,
+        order_id,
+        "OrderCreated",
+        order_id,
+        None,
+        data,
+    )
+    .await
+}
+
+pub(crate) async fn enqueue_order_event(
+    connection: &mut PgConnection,
+    event_id: Uuid,
+    order_id: Uuid,
+    event_type: &str,
+    correlation_id: Uuid,
+    causation_id: Option<Uuid>,
+    data: Value,
+) -> Result<(), sqlx::Error> {
+    let payload = serde_json::json!({
+        "event_id": event_id.to_string(),
+        "event_type": event_type,
+        "schema_version": 1,
+        // PostgreSQL supplies the timestamp from this transaction's clock.
+        "occurred_at": Value::Null,
+        "order_id": order_id.to_string(),
+        "correlation_id": correlation_id.to_string(),
+        "causation_id": causation_id.map(|id| id.to_string()),
+        "data": data,
+    });
     let target_topic = std::env::var("KAFKA_ORDERS_TOPIC")
         .ok()
         .filter(|topic| !topic.trim().is_empty())
@@ -105,11 +127,12 @@ pub(crate) async fn enqueue_order_created(
     sqlx::query(
         "INSERT INTO outbox_events \
          (event_id, aggregate_id, event_type, schema_version, target_topic, message_key, payload) \
-         VALUES ($1, $2, 'OrderCreated', 1, $3, $4, \
-             jsonb_set($5, '{occurred_at}', to_jsonb(transaction_timestamp()), TRUE))",
+         VALUES ($1, $2, $3, 1, $4, $5, \
+             jsonb_set($6, '{occurred_at}', to_jsonb(transaction_timestamp()), TRUE))",
     )
     .bind(event_id)
     .bind(order_id)
+    .bind(event_type)
     .bind(target_topic)
     .bind(order_id.to_string())
     .bind(Json(payload))

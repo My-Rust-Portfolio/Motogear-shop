@@ -876,6 +876,7 @@ version = "0.1.0"
 dependencies = [
  "dotenvy",
  "motogear-domain",
+ "serde",
  "serde_json",
  "sqlx",
  "tokio",
@@ -887,9 +888,14 @@ name = "motogear-workers"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "motogear-domain",
  "motogear-persistence",
  "rdkafka",
+ "serde",
+ "serde_json",
+ "sqlx",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
