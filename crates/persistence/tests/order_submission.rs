@@ -8,6 +8,11 @@ use motogear_persistence::{
     events::outbox::{
         mark_outbox_event_published, next_unpublished_event, record_outbox_publish_failure,
     },
+    fulfillment::{
+        FULFILLMENT_CONSUMER_NAME, FulfillmentOutcome, FulfillmentProcessError, OrderAcceptedData,
+        OrderAcceptedEvent, OrderAcceptedItem, fulfillment_event_is_processed,
+        process_order_accepted,
+    },
     inventory::{InventoryOutcome, OrderCreatedEvent, process_order_created},
     orders::{OrderSubmissionError, submit_order},
     run_migrations,
@@ -130,6 +135,65 @@ async fn order_created_event(pool: &PgPool, order_id: Uuid) -> OrderCreatedEvent
     serde_json::from_value(payload.0).expect("stored event should match the OrderCreated contract")
 }
 
+async fn order_accepted_event(pool: &PgPool, order_id: Uuid) -> OrderAcceptedEvent {
+    let payload: Json<serde_json::Value> = query_scalar(
+        "SELECT payload FROM outbox_events \
+         WHERE aggregate_id = $1 AND event_type = 'OrderAccepted'",
+    )
+    .bind(order_id)
+    .fetch_one(pool)
+    .await
+    .expect("OrderAccepted event should exist");
+
+    serde_json::from_value(payload.0).expect("stored event should match the OrderAccepted contract")
+}
+
+fn accepted_event_for_order_created(event: OrderCreatedEvent) -> OrderAcceptedEvent {
+    OrderAcceptedEvent {
+        event_id: Uuid::new_v4(),
+        event_type: "OrderAccepted".to_owned(),
+        schema_version: 1,
+        order_id: event.order_id,
+        correlation_id: event.correlation_id,
+        data: OrderAcceptedData {
+            customer_id: event.data.customer_id,
+            items: event
+                .data
+                .items
+                .into_iter()
+                .map(|item| OrderAcceptedItem {
+                    product_id: item.product_id,
+                    quantity: item.quantity,
+                })
+                .collect(),
+        },
+    }
+}
+
+async fn make_accepted_order(
+    pool: &PgPool,
+    customer_id: Uuid,
+    product_id: Uuid,
+    quantity: i32,
+) -> (Uuid, OrderAcceptedEvent) {
+    let submitted = submit_order(
+        pool,
+        &valid_request(customer_id, product_id, quantity),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("order submission should succeed");
+    let created_event = order_created_event(pool, submitted.order_id).await;
+    assert_eq!(
+        process_order_created(pool, &created_event)
+            .await
+            .expect("inventory processing should succeed"),
+        InventoryOutcome::Accepted
+    );
+    let accepted_event = order_accepted_event(pool, submitted.order_id).await;
+    (submitted.order_id, accepted_event)
+}
+
 async fn stock_available(pool: &PgPool, product_id: Uuid) -> i32 {
     query_scalar("SELECT stock_available FROM products WHERE id = $1")
         .bind(product_id)
@@ -164,6 +228,15 @@ async fn count_processed_inventory_events(pool: &PgPool, event_id: Uuid) -> i64 
     .fetch_one(pool)
     .await
     .expect("processed-event count query should succeed")
+}
+
+async fn count_processed_fulfillment_events(pool: &PgPool, event_id: Uuid) -> i64 {
+    query_scalar("SELECT COUNT(*) FROM processed_events WHERE consumer_name = $1 AND event_id = $2")
+        .bind(FULFILLMENT_CONSUMER_NAME)
+        .bind(event_id)
+        .fetch_one(pool)
+        .await
+        .expect("fulfillment processed-event count query should succeed")
 }
 
 #[tokio::test]
@@ -981,5 +1054,337 @@ async fn submitting_an_order_does_not_change_stock() {
         .expect("stock should still be present");
 
     assert_eq!(after, before);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn fulfillment_ships_accepted_order_and_emits_order_shipped() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, event) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    let stock_before_shipment = stock_available(&database.pool, helmet).await;
+    assert!(
+        !fulfillment_event_is_processed(&database.pool, event.event_id)
+            .await
+            .expect("deduplication marker lookup should succeed")
+    );
+
+    let result = process_order_accepted(&database.pool, &event)
+        .await
+        .expect("accepted order should be fulfilled");
+    let tracking_reference = format!("SIM-{}", order_id.simple().to_string().to_ascii_uppercase());
+    assert_eq!(
+        result,
+        FulfillmentOutcome::Shipped {
+            tracking_reference: tracking_reference.clone()
+        }
+    );
+
+    let (status,): (String,) = query_as("SELECT status FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("order status should be queryable");
+    assert_eq!(status, "shipped");
+    let (shipment_count, saved_tracking): (i64, String) = query_as(
+        "SELECT COUNT(*), COALESCE(MAX(tracking_reference), '') \
+         FROM shipments WHERE order_id = $1",
+    )
+    .bind(order_id)
+    .fetch_one(&database.pool)
+    .await
+    .expect("shipment row should be queryable");
+    assert_eq!(shipment_count, 1);
+    assert_eq!(saved_tracking, tracking_reference);
+    assert_eq!(
+        count_order_events(&database.pool, order_id, "OrderShipped").await,
+        1
+    );
+    assert_eq!(
+        stock_available(&database.pool, helmet).await,
+        stock_before_shipment
+    );
+    assert_eq!(
+        count_processed_fulfillment_events(&database.pool, event.event_id).await,
+        1
+    );
+    assert!(
+        fulfillment_event_is_processed(&database.pool, event.event_id)
+            .await
+            .expect("deduplication marker lookup should succeed")
+    );
+
+    let payload: Json<serde_json::Value> = query_scalar(
+        "SELECT payload FROM outbox_events \
+         WHERE aggregate_id = $1 AND event_type = 'OrderShipped'",
+    )
+    .bind(order_id)
+    .fetch_one(&database.pool)
+    .await
+    .expect("OrderShipped payload should be queryable");
+    assert_eq!(payload.0["causation_id"], event.event_id.to_string());
+    assert_eq!(payload.0["data"]["customer_id"], customer.to_string());
+    assert_eq!(payload.0["data"]["total_cents"], 14_900);
+    assert_eq!(payload.0["data"]["currency"], "EUR");
+    assert_eq!(payload.0["data"]["tracking_reference"], tracking_reference);
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn duplicate_fulfillment_delivery_does_not_create_a_second_shipment() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, event) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+
+    assert!(matches!(
+        process_order_accepted(&database.pool, &event).await,
+        Ok(FulfillmentOutcome::Shipped { .. })
+    ));
+    assert_eq!(
+        process_order_accepted(&database.pool, &event)
+            .await
+            .expect("duplicate should be a safe no-op"),
+        FulfillmentOutcome::Duplicate
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 1);
+    assert_eq!(
+        count_order_events(&database.pool, order_id, "OrderShipped").await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn distinct_accepted_event_for_shipped_order_does_not_create_another_shipment() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, event) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    process_order_accepted(&database.pool, &event)
+        .await
+        .expect("first event should ship the order");
+    let mut second_event = event.clone();
+    second_event.event_id = Uuid::new_v4();
+
+    assert_eq!(
+        process_order_accepted(&database.pool, &second_event)
+            .await
+            .expect("already shipped order should be ignored"),
+        FulfillmentOutcome::IgnoredAlreadyShipped
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 1);
+    assert_eq!(
+        count_order_events(&database.pool, order_id, "OrderShipped").await,
+        1
+    );
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn fulfillment_rejects_pending_order_without_shipment() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let submitted = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 1),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("order submission should succeed");
+    let event = accepted_event_for_order_created(
+        order_created_event(&database.pool, submitted.order_id).await,
+    );
+
+    assert!(matches!(
+        process_order_accepted(&database.pool, &event).await,
+        Err(FulfillmentProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(
+        count_processed_fulfillment_events(&database.pool, event.event_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, submitted.order_id, "OrderShipped").await,
+        0
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(submitted.order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 0);
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn fulfillment_rejects_rejected_order_without_shipment() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let submitted = submit_order(
+        &database.pool,
+        &valid_request(customer, helmet, 4),
+        Uuid::new_v4(),
+    )
+    .await
+    .expect("order submission should succeed");
+    let created = order_created_event(&database.pool, submitted.order_id).await;
+    assert!(matches!(
+        process_order_created(&database.pool, &created)
+            .await
+            .expect("short order should be rejected"),
+        InventoryOutcome::Rejected { .. }
+    ));
+    let event = accepted_event_for_order_created(created);
+
+    assert!(matches!(
+        process_order_accepted(&database.pool, &event).await,
+        Err(FulfillmentProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(
+        count_processed_fulfillment_events(&database.pool, event.event_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, submitted.order_id, "OrderShipped").await,
+        0
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(submitted.order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 0);
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn mismatched_fulfillment_event_lines_roll_back_deduplication_marker() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, mut event) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    event.data.items[0].quantity = 2;
+
+    assert!(matches!(
+        process_order_accepted(&database.pool, &event).await,
+        Err(FulfillmentProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(
+        count_processed_fulfillment_events(&database.pool, event.event_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order_id, "OrderShipped").await,
+        0
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 0);
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn mismatched_stock_reservations_roll_back_fulfillment() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, event) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+    query("DELETE FROM stock_reservations WHERE order_id = $1")
+        .bind(order_id)
+        .execute(&database.pool)
+        .await
+        .expect("test reservation should be removed");
+
+    assert!(matches!(
+        process_order_accepted(&database.pool, &event).await,
+        Err(FulfillmentProcessError::InvalidEvent(_))
+    ));
+    assert_eq!(
+        count_processed_fulfillment_events(&database.pool, event.event_id).await,
+        0
+    );
+    assert_eq!(
+        count_order_events(&database.pool, order_id, "OrderShipped").await,
+        0
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 0);
+    let status: String = query_scalar("SELECT status FROM orders WHERE id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("order status should be queryable");
+    assert_eq!(status, "accepted");
+
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_fulfillment_events_create_one_shipment_and_event() {
+    let database = TestDatabase::new().await;
+    let customer = customer_id(&database.pool).await;
+    let helmet = product_id(&database.pool, "HELMET-TOUR-01").await;
+    let (order_id, event) = make_accepted_order(&database.pool, customer, helmet, 1).await;
+
+    let (first, second) = tokio::join!(
+        process_order_accepted(&database.pool, &event),
+        process_order_accepted(&database.pool, &event),
+    );
+    let outcomes = [
+        first.expect("first concurrent delivery should succeed"),
+        second.expect("second concurrent delivery should succeed"),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, FulfillmentOutcome::Shipped { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, FulfillmentOutcome::Duplicate))
+            .count(),
+        1
+    );
+    let shipment_count: i64 = query_scalar("SELECT COUNT(*) FROM shipments WHERE order_id = $1")
+        .bind(order_id)
+        .fetch_one(&database.pool)
+        .await
+        .expect("shipment count should be queryable");
+    assert_eq!(shipment_count, 1);
+    assert_eq!(
+        count_order_events(&database.pool, order_id, "OrderShipped").await,
+        1
+    );
+
     database.cleanup().await;
 }

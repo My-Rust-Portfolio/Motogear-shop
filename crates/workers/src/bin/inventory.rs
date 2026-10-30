@@ -280,6 +280,7 @@ mod tests {
     use motogear_domain::orders::{OrderRequest, OrderRequestItem};
     use motogear_persistence::{
         events::outbox::{mark_outbox_event_published, next_unpublished_event},
+        fulfillment::{FulfillmentOutcome, OrderAcceptedEvent, process_order_accepted},
         inventory::{InventoryOutcome, process_order_created},
         migrations::run_migrations,
         orders::submit_order,
@@ -296,7 +297,7 @@ mod tests {
     use sqlx::{
         AssertSqlSafe,
         postgres::{PgConnectOptions, PgPoolOptions},
-        query, query_scalar,
+        query, query_as, query_scalar,
     };
     use tokio::time::timeout;
     use uuid::Uuid;
@@ -505,7 +506,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a real Kafka broker and TEST_DATABASE_URL"]
-    async fn kafka_inventory_pipeline_and_consumer_restart_are_idempotent()
+    async fn kafka_order_lifecycle_pipeline_and_consumer_restart_are_idempotent()
     -> Result<(), Box<dyn std::error::Error>> {
         let _ = dotenvy::dotenv();
         let database = TestDatabase::new().await;
@@ -611,13 +612,23 @@ mod tests {
 
         let accepted_message =
             timeout(Duration::from_secs(15), restarted_consumer.recv()).await??;
-        let accepted_header: EventHeader = serde_json::from_slice(
-            accepted_message
-                .payload()
-                .expect("record should have payload"),
-        )?;
+        let accepted_payload = accepted_message
+            .payload()
+            .expect("record should have payload");
+        let accepted_header: EventHeader = serde_json::from_slice(accepted_payload)?;
         assert_eq!(accepted_header.event_type, "OrderAccepted");
         assert_eq!(accepted_header.schema_version, 1);
+        let accepted_event: OrderAcceptedEvent = serde_json::from_slice(accepted_payload)?;
+        let fulfillment = process_order_accepted(&database.pool, &accepted_event).await?;
+        let tracking_reference = match fulfillment {
+            FulfillmentOutcome::Shipped { tracking_reference } => tracking_reference,
+            outcome => {
+                return Err(std::io::Error::other(format!(
+                    "expected shipment to be created, got {outcome:?}"
+                ))
+                .into());
+            }
+        };
         restarted_consumer.commit_message(&accepted_message, CommitMode::Sync)?;
 
         assert_eq!(stock_available(&database.pool, product_id).await, 2);
@@ -631,7 +642,58 @@ mod tests {
         .await?;
         assert_eq!(accepted_count, 1);
 
+        let shipped_id: Uuid = query_scalar(
+            "SELECT event_id FROM outbox_events \
+             WHERE aggregate_id = $1 AND event_type = 'OrderShipped'",
+        )
+        .bind(order.order_id)
+        .fetch_one(&database.pool)
+        .await?;
+        query("UPDATE outbox_events SET target_topic = $2 WHERE event_id = $1")
+            .bind(shipped_id)
+            .bind(&topic)
+            .execute(&database.pool)
+            .await?;
+        let shipped = next_unpublished_event(&database.pool)
+            .await?
+            .expect("fulfillment transaction should create OrderShipped");
+        publish_test_record(
+            &producer,
+            &topic,
+            &shipped.message_key,
+            &shipped.payload.0.to_string(),
+        )
+        .await?;
+        assert!(mark_outbox_event_published(&database.pool, shipped.event_id).await?);
+
+        let shipped_message = timeout(Duration::from_secs(15), restarted_consumer.recv()).await??;
+        let shipped_payload = shipped_message
+            .payload()
+            .expect("OrderShipped Kafka record should have a payload");
+        let shipped_header: EventHeader = serde_json::from_slice(shipped_payload)?;
+        assert_eq!(shipped_header.event_type, "OrderShipped");
+        assert_eq!(shipped_header.schema_version, 1);
+        let shipped_body: serde_json::Value = serde_json::from_slice(shipped_payload)?;
+        assert_eq!(
+            shipped_body["data"]["tracking_reference"],
+            tracking_reference
+        );
+        assert_eq!(shipped_body["data"]["total_cents"], 14_900);
+        restarted_consumer.commit_message(&shipped_message, CommitMode::Sync)?;
+
+        let (status, shipment_count): (String, i64) = query_as(
+            "SELECT o.status, COUNT(s.id) FROM orders o \
+             LEFT JOIN shipments s ON s.order_id = o.id \
+             WHERE o.id = $1 GROUP BY o.status",
+        )
+        .bind(order.order_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(status, "shipped");
+        assert_eq!(shipment_count, 1);
+
         drop(accepted_message);
+        drop(shipped_message);
         drop(restarted_consumer);
         drop(producer);
         let _ = admin

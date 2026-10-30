@@ -21,6 +21,9 @@ services:
   kafka:
     image: apache/kafka:4.4.0
     hostname: kafka
+    depends_on:
+      kafka-volume-init:
+        condition: service_completed_successfully
     # Plaintext is limited to local development and the private Compose network.
     ports:
       - "127.0.0.1:9092:9092"
@@ -58,6 +61,15 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+
+  kafka-volume-init:
+    image: apache/kafka:4.4.0
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown 1000:1000 /tmp/kraft-combined-logs"]
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+    restart: "no"
 
   kafka-init:
     image: apache/kafka:4.4.0

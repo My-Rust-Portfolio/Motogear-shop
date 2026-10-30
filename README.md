@@ -100,6 +100,33 @@ logged with their Kafka location and committed so the group can continue. They
 are not durably quarantined yet, so this consumer group has moved past them;
 quarantine and dead-letter publishing are a later phase.
 
+## Run the fulfillment consumer
+
+In another terminal, start the fulfillment worker:
+
+```powershell
+cargo run -p motogear-workers --bin fulfillment
+```
+
+It consumes `OrderAccepted` events as group `motogear-fulfillment-v1`. After a
+short simulated delay (2 seconds by default, configurable with
+`FULFILLMENT_DELAY_MS` up to 30000; `0` disables the delay), it records a
+visibly simulated `SIM-<order UUID>` tracking reference, moves the order to
+`shipped`, and enqueues `OrderShipped` in one transaction. Before waiting, it
+checks whether that event already has a committed processed marker, so ordinary
+redeliveries skip the delay. The transactional deduplication check remains the
+final authority if concurrent deliveries race that lookup.
+The transaction checks the accepted order lines against the event and saved
+stock reservations. It does not deduct stock again. A redelivered event is
+deduplicated using `processed_events`; the order lock and one-shipment-per-order
+constraint also prevent a second shipment. The API's order history refresh will
+show the shipped state and tracking reference.
+
+The worker skips malformed, unsupported-version, and unrelated event types
+after logging them, matching the current inventory worker policy. Durable
+quarantine is a later phase. The shipment is simulated; no carrier or external
+shipping service is contacted.
+
 ## Seed demo data
 
 After applying the migrations, insert the fictional customers and products:
@@ -202,14 +229,15 @@ Database-backed tests create a uniquely named schema, apply the real migrations
 and seed data there, and drop that schema when the test finishes. They do not
 change the database's `public` schema. Persistence tests cover order submission,
 idempotency, purchase-time prices, outbox atomicity and publishing state
-transitions, inventory acceptance/rejection, duplicate delivery, rollback,
-concurrent duplicate processing, and order detail/history responses including
-purchase-time prices, status changes, rejection reasons, and shipment data.
+transitions, inventory acceptance/rejection, fulfillment shipment creation and
+deduplication, rollback, concurrent duplicate processing, and order detail/history
+responses including status changes, rejection reasons, and shipment data.
 
-The real Kafka-to-PostgreSQL inventory pipeline test is ignored during ordinary
-test runs because it requires the local broker and `TEST_DATABASE_URL`. Run it
-explicitly after starting PostgreSQL and Kafka:
+The real Kafka-to-PostgreSQL order lifecycle pipeline test is ignored during
+ordinary test runs because it requires the local broker and `TEST_DATABASE_URL`.
+It verifies `OrderCreated` → `OrderAccepted` → `OrderShipped` and consumer restart
+behavior. Run it explicitly after starting PostgreSQL and Kafka:
 
 ```powershell
-cargo test -p motogear-workers --bin inventory kafka_inventory_pipeline_and_consumer_restart_are_idempotent -- --ignored
+cargo test -p motogear-workers --bin inventory kafka_order_lifecycle_pipeline_and_consumer_restart_are_idempotent -- --ignored
 ```
