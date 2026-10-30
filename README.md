@@ -73,15 +73,18 @@ For example, in PowerShell:
 Invoke-RestMethod http://127.0.0.1:3000/api/v1/products
 ```
 
-## Test the catalogue API
+## Database-backed tests
 
-The API tests use PostgreSQL. Set `TEST_DATABASE_URL` to a database where the
-test role can create schemas, then run:
+The API and persistence integration tests use PostgreSQL. Set
+`TEST_DATABASE_URL` to a database where the test role can create schemas, then
+run:
 
 ```powershell
 cargo test -p motogear-api
+cargo test -p motogear-persistence
 ```
 
 Database-backed tests create a uniquely named schema, apply the real migrations
 and seed data there, and drop that schema when the test finishes. They do not
-change the database's `public` schema.
+change the database's `public` schema. Persistence tests cover order submission,
+idempotency, purchase-time prices, outbox atomicity, and concurrent retries.

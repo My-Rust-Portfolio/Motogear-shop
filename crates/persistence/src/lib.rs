@@ -1,5 +1,6 @@
 pub mod catalogue;
 pub mod config;
+pub mod orders;
 pub mod seed;
 
 use sqlx::{
