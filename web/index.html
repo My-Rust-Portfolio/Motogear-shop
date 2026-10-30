@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101d32" />
+    <title>MotoGear Shop</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="MotoGear Shop home">
+          <span class="brand-mark" aria-hidden="true">MG</span>
+          <span class="brand-name">MotoGear <span>Shop</span></span>
+        </a>
+
+        <div class="header-controls">
+          <div class="connection" role="status" aria-live="polite">
+            <span id="connection-indicator" class="connection-indicator" aria-hidden="true"></span>
+            <span id="connection-status">Checking connection</span>
+          </div>
+
+          <label class="customer-picker" for="customer-select">
+            <span>Demo customer</span>
+            <select id="customer-select" disabled>
+              <option>Loading customers…</option>
+            </select>
+            <span id="customer-status" class="customer-status" aria-live="polite">
+              Saved for this tab; checkout is not connected yet.
+            </span>
+          </label>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero" aria-labelledby="welcome-title">
+          <div class="hero-copy">
+            <p class="eyebrow">GEAR UP. GET OUT THERE.</p>
+            <h1 id="welcome-title">Ready for the next road.</h1>
+            <p class="hero-description">
+              Practical motorcycle gear for the miles ahead. Browse the shared
+              catalogue and see the latest available stock.
+            </p>
+          </div>
+          <div class="hero-badge" aria-hidden="true">
+            <span class="badge-ring">RIDE<br />MORE</span>
+          </div>
+        </section>
+
+        <section class="catalogue" aria-labelledby="catalogue-title">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">THE SHOP</p>
+              <h2 id="catalogue-title">Riding essentials</h2>
+            </div>
+            <p id="catalogue-refresh" class="refresh-status" aria-live="polite">
+              Loading catalogue…
+            </p>
+          </div>
+
+          <aside class="cart-panel" aria-labelledby="cart-title">
+            <div class="cart-heading">
+              <div>
+                <p class="eyebrow">YOUR SELECTION</p>
+                <h2 id="cart-title">Cart <span id="cart-count" class="cart-count">(0)</span></h2>
+              </div>
+              <p class="cart-total">Total <strong id="cart-total">€0.00</strong></p>
+            </div>
+            <p id="cart-empty" class="cart-empty">Your cart is empty.</p>
+            <ul id="cart-items" class="cart-items" aria-live="polite"></ul>
+            <p class="cart-note">Browser-only draft. Adding items does not place an order or reserve stock.</p>
+          </aside>
+
+          <div id="products" class="product-grid" aria-live="polite" aria-busy="true"></div>
+          <p id="empty-state" class="empty-state" hidden>No active products are available right now.</p>
+          <p class="catalogue-note">Stock is shared with other shop windows and may change as orders are processed.</p>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <span>MotoGear Shop</span>
+        <span>Local demo catalogue · Prices in EUR</span>
+      </footer>
+    </div>
+  </body>
+</html>

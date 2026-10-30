@@ -49,6 +49,17 @@ The API currently exposes `GET /health/live` for process liveness and
 depend on PostgreSQL; readiness returns HTTP 503 until all migrations included
 in this build have been applied.
 
+Open the browser shop at <http://127.0.0.1:3000/>. Axum serves the HTML, CSS,
+and vanilla JavaScript from the same process as the API, with no frontend build
+step. The page loads the customer selector and catalogue from the API, remembers
+the selected customer per tab, and refreshes shared product stock every two
+seconds while the tab is visible. The customer selection is demo state only at
+this stage; it does not affect any shop operation because checkout is not
+implemented yet. Product quantity controls and the cart are also browser-only:
+they show a draft selection but do not create an order or reserve stock. The
+browser requests up to 100 active products so the current demo catalogue fits
+in one response; pagination controls can replace this when the catalogue grows.
+
 The read-only catalogue endpoints are:
 
 - `GET /api/v1/customers?limit=20&offset=0` — demo identities for the customer selector.

@@ -9,6 +9,7 @@ dotenvy = "0.15.7"
 motogear-persistence = { version = "0.1.0", path = "../persistence" }
 serde = { version = "1.0.229", features = ["derive"] }
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread"] }
+tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 uuid = { version = "1.29.0", features = ["serde", "v4"] }
 
 [dev-dependencies]

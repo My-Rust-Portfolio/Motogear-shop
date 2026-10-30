@@ -15,6 +15,7 @@ use motogear_persistence::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
 
 const DEFAULT_PAGE_SIZE: u32 = 20;
@@ -41,6 +42,8 @@ fn routes(pool: PgPool) -> Router {
         .route("/health/ready", get(ready))
         .route("/api/v1/customers", get(customers))
         .route("/api/v1/products", get(products))
+        .route_service("/", ServeFile::new("web/index.html"))
+        .nest_service("/static", ServeDir::new("web"))
         .with_state(pool)
 }
 
