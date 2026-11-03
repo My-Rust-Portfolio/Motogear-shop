@@ -1,5 +1,35 @@
 # MotoGear Shop
 
+MotoGear Shop is a local-first motorcycle gear store demo built as a Rust
+workspace. It shows how an Axum API, PostgreSQL transactions and an outbox,
+Kafka, and independent workers can work together through an order lifecycle.
+The browser is served by the API and uses plain HTML, CSS, and JavaScript.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Browser[Browser] -->|REST| API[Axum API]
+    API -->|Order and OrderCreated outbox transaction| DB[(PostgreSQL)]
+    DB -->|Unpublished outbox events| Publisher[Outbox publisher]
+    Publisher -->|At-least-once delivery| Kafka[(Kafka)]
+    Kafka -->|OrderCreated| Inventory[Inventory worker]
+    Inventory -->|Reserve stock and enqueue Accepted or Rejected| DB
+    Kafka -->|OrderAccepted| Fulfillment[Fulfillment worker]
+    Fulfillment -->|Simulate shipment and enqueue OrderShipped| DB
+    Kafka -->|Lifecycle events| Notifications[Notifications worker]
+    Notifications -->|Deduplicated customer notifications| DB
+    API -->|Orders and notifications| Browser
+```
+
+## Demo scope
+
+This is a portfolio and learning project, not a production commerce system. It
+uses fictional catalogue data, a single local Kafka broker, and simulated
+fulfillment with visibly simulated tracking references. It does not process
+payments, authenticate customers, or contact a real carrier. The local Kafka
+broker uses plaintext and is configured for one-node development.
+
 ## Apply database migrations
 
 The migration command uses SQLx to apply any pending files from `migrations/`.
