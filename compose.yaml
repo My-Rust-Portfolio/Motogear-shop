@@ -1,3 +1,16 @@
+x-rust-app: &rust-app
+  image: motogear-shop:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+x-database-environment: &database-environment
+  POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+  POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+
 services:
   postgres:
     image: postgres:17
@@ -89,6 +102,101 @@ services:
       - --replication-factor
       - "1"
     restart: "no"
+
+  migrate:
+    <<: *rust-app
+    command: ["/usr/local/bin/migrate"]
+    environment: *database-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  seed:
+    <<: *rust-app
+    profiles: ["demo"]
+    command: ["/usr/local/bin/seed"]
+    environment: *database-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  api:
+    <<: *rust-app
+    command: ["/usr/local/bin/motogear-api"]
+    environment:
+      <<: *database-environment
+      API_BIND_ADDRESS: "0.0.0.0:3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:3000/health/ready >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  publisher:
+    <<: *rust-app
+    command: ["/usr/local/bin/publisher"]
+    environment:
+      <<: *database-environment
+      KAFKA_BROKERS: ${KAFKA_BROKERS_DOCKER:-kafka:19092}
+      KAFKA_ORDERS_TOPIC: ${KAFKA_ORDERS_TOPIC:-shop.orders.v1}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  inventory:
+    <<: *rust-app
+    command: ["/usr/local/bin/inventory"]
+    environment:
+      <<: *database-environment
+      KAFKA_BROKERS: ${KAFKA_BROKERS_DOCKER:-kafka:19092}
+      KAFKA_ORDERS_TOPIC: ${KAFKA_ORDERS_TOPIC:-shop.orders.v1}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  fulfillment:
+    <<: *rust-app
+    command: ["/usr/local/bin/fulfillment"]
+    environment:
+      <<: *database-environment
+      KAFKA_BROKERS: ${KAFKA_BROKERS_DOCKER:-kafka:19092}
+      KAFKA_ORDERS_TOPIC: ${KAFKA_ORDERS_TOPIC:-shop.orders.v1}
+      FULFILLMENT_DELAY_MS: ${FULFILLMENT_DELAY_MS:-2000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  notifications:
+    <<: *rust-app
+    command: ["/usr/local/bin/notifications"]
+    environment:
+      <<: *database-environment
+      KAFKA_BROKERS: ${KAFKA_BROKERS_DOCKER:-kafka:19092}
+      KAFKA_ORDERS_TOPIC: ${KAFKA_ORDERS_TOPIC:-shop.orders.v1}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   postgres_data:

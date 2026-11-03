@@ -5,6 +5,47 @@ workspace. It shows how an Axum API, PostgreSQL transactions and an outbox,
 Kafka, and independent workers can work together through an order lifecycle.
 The browser is served by the API and uses plain HTML, CSS, and JavaScript.
 
+## Run the full stack with Docker Compose
+
+Docker Desktop with Linux containers is enough to build and run the application;
+you do not need Rust or the Kafka C++ build tools on the host.
+
+1. Copy `.env.example` to `.env` and set a local PostgreSQL password.
+2. Build and start PostgreSQL, Kafka, migrations, the API, and all workers:
+
+   ```powershell
+   docker compose up --build -d
+   ```
+
+   Compose waits for PostgreSQL and Kafka, creates the orders topic, applies
+   migrations, and then starts the API and workers. The API is available at
+   <http://127.0.0.1:3000/>.
+
+3. On first startup, insert the fictional customers and products:
+
+   ```powershell
+   docker compose --profile demo run --rm seed
+   ```
+
+   The seed service is explicit and inserts only missing rows; it does not
+   restore stock on later runs.
+
+Useful operations:
+
+```powershell
+docker compose ps
+docker compose logs -f api publisher inventory fulfillment notifications
+docker compose down
+```
+
+`docker compose down` preserves PostgreSQL and Kafka data in named volumes.
+`docker compose down --volumes` deletes those volumes and resets the local shop.
+The publisher is intended to run once; consumers can be scaled within their
+Kafka consumer groups, for example with `docker compose up -d --scale inventory=2`.
+
+The remaining run instructions below show how to launch Rust processes directly
+from the host when developing without the full application image.
+
 ## Architecture
 
 ```mermaid
