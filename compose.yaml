@@ -128,6 +128,7 @@ services:
     environment:
       <<: *database-environment
       API_BIND_ADDRESS: "0.0.0.0:3000"
+      KAFKA_ORDERS_TOPIC: ${KAFKA_ORDERS_TOPIC:-shop.orders.v1}
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
@@ -154,6 +155,8 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 30s
 
   inventory:
     <<: *rust-app
@@ -168,6 +171,8 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 30s
 
   fulfillment:
     <<: *rust-app
@@ -183,6 +188,8 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 30s
 
   notifications:
     <<: *rust-app
@@ -197,6 +204,8 @@ services:
       kafka-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 30s
 
 volumes:
   postgres_data:

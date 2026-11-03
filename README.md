@@ -18,8 +18,9 @@ you do not need Rust or the Kafka C++ build tools on the host.
    ```
 
    Compose waits for PostgreSQL and Kafka, creates the orders topic, applies
-   migrations, and then starts the API and workers. The API is available at
-   <http://127.0.0.1:3000/>.
+   migrations, and then starts the API and workers. The API starts at
+   <http://127.0.0.1:3000/>; seed the demo data in the next step before opening
+   the shop in a browser.
 
 3. On first startup, insert the fictional customers and products:
 
@@ -29,6 +30,9 @@ you do not need Rust or the Kafka C++ build tools on the host.
 
    The seed service is explicit and inserts only missing rows; it does not
    restore stock on later runs.
+
+4. Open <http://127.0.0.1:3000/> after seeding to use the shop with its demo
+   customers and products.
 
 Useful operations:
 
@@ -42,6 +46,9 @@ docker compose down
 `docker compose down --volumes` deletes those volumes and resets the local shop.
 The publisher is intended to run once; consumers can be scaled within their
 Kafka consumer groups, for example with `docker compose up -d --scale inventory=2`.
+Compose sends SIGINT to the publisher and consumers on shutdown so their Ctrl+C
+handlers can finish cleanly, then waits up to 30 seconds before force-stopping
+any process that has not exited.
 
 The remaining run instructions below show how to launch Rust processes directly
 from the host when developing without the full application image.

@@ -11,7 +11,7 @@ COPY crates ./crates
 COPY migrations ./migrations
 COPY web ./web
 
-RUN cargo build --release --workspace --bins
+RUN cargo build --locked --release --workspace --bins
 
 FROM debian:bookworm-slim AS runtime
 
