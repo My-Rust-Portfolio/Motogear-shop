@@ -1,0 +1,53 @@
+sequenceDiagram
+    autonumber
+    participant Kafka as Kafka orders topic
+    participant Worker as Fulfillment consumer
+    participant Store as Persistence fulfillment transaction
+    participant DB as PostgreSQL
+
+    Kafka-->>Worker: OrderAccepted record
+    Worker->>Store: fulfillment_event_is_processed(event_id)
+    Store->>DB: Check processed marker to avoid delay on ordinary replay
+    alt Previously processed
+        DB-->>Store: Marker exists
+        Store-->>Worker: Already processed, skip simulation delay
+    else New event
+        DB-->>Store: No marker
+        Store-->>Worker: New event
+        Worker->>Worker: Optional configured simulation delay
+    end
+    Worker->>Store: process_order_accepted(event)
+    Store->>DB: Begin transaction, insert processed_events marker
+    alt Concurrent or repeated delivery already processed
+        DB-->>Store: Conflict, no new marker
+        Store->>DB: Commit no-op transaction
+        Store-->>Worker: Duplicate
+        Worker->>Kafka: Commit offset
+    else New event marker
+        Store->>DB: Lock order and verify event customer
+        alt Order is already shipped
+            Store->>DB: Commit processed marker without another shipment
+            Store-->>Worker: IgnoredAlreadyShipped
+            Worker->>Kafka: Commit offset
+        else Order is not accepted
+            Store-->>Worker: InvalidEvent, transaction rolls back
+            Worker->>Worker: Log and skip invalid record
+            Worker->>Kafka: Commit skipped offset
+        else Order is accepted
+            Store->>DB: Compare event lines and saved stock reservations
+            alt Event or reservation data does not match
+                Store-->>Worker: InvalidEvent, transaction rolls back
+                Worker->>Worker: Log and skip invalid record
+                Worker->>Kafka: Commit skipped offset
+            else Order and reservations match
+                Store->>DB: Insert simulated shipment and tracking reference
+                Store->>DB: Update order status to shipped
+                Store->>DB: Enqueue OrderShipped in outbox
+                Store->>DB: Commit marker, shipment, status, and event
+                DB-->>Store: Commit succeeded
+                Store-->>Worker: Shipped(tracking_reference)
+                Worker->>Kafka: Commit offset after DB commit
+            end
+        end
+    end
+    Note over Store,DB: No stock changes here, inventory was reserved on acceptance.

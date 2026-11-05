@@ -1,0 +1,47 @@
+flowchart LR
+    subgraph Project["MotoGear Shop project repository and build targets"]
+        BrowserAssets["Browser assets<br/>web/index.html, app.js, styles.css"]
+        ApiCrate["motogear-api crate<br/>routes, DTOs, app setup"]
+        DomainCrate["motogear-domain crate<br/>Money, Quantity, order rules"]
+        PersistenceCrate["motogear-persistence crate<br/>SQLx queries and transactions"]
+        WorkerCrate["motogear-workers crate<br/>four independent binaries"]
+        MigrationFiles["SQLx migration files"]
+    end
+
+    subgraph Runtime["Running system"]
+        BrowserClient["Browser client<br/>executes JavaScript"]
+        ApiProcess["API process"]
+        Publisher["Publisher process"]
+        Inventory["Inventory process"]
+        Fulfillment["Fulfillment process"]
+        Notifications["Notifications process"]
+        DB[("PostgreSQL")]
+        Kafka[("Kafka<br/>shop.orders.v1")]
+    end
+
+    ApiCrate -.->|crate dependency| DomainCrate
+    ApiCrate -.->|crate dependency| PersistenceCrate
+    PersistenceCrate -.->|crate dependency| DomainCrate
+    WorkerCrate -.->|crate dependency| PersistenceCrate
+    MigrationFiles -.->|embedded by SQLx at build time| PersistenceCrate
+
+    BrowserAssets -.->|packaged into image| ApiProcess
+    ApiCrate -.->|builds| ApiProcess
+    WorkerCrate -.->|builds| Publisher
+    WorkerCrate -.->|builds| Inventory
+    WorkerCrate -.->|builds| Fulfillment
+    WorkerCrate -.->|builds| Notifications
+
+    BrowserClient -->|HTTP JSON| ApiProcess
+    ApiProcess -->|serve HTML, CSS, JavaScript| BrowserClient
+    ApiProcess -->|queries and commands| DB
+    Publisher -->|poll and update outbox| DB
+    Publisher -->|publish| Kafka
+    Kafka -->|consume| Inventory
+    Kafka -->|consume| Fulfillment
+    Kafka -->|consume| Notifications
+    Inventory -->|stock, reservations, order state, outbox| DB
+    Fulfillment -->|shipment, order state, outbox| DB
+    Notifications -->|dedupe markers and notifications| DB
+
+    Legend["Dashed arrows: repository/build dependencies<br/>Solid arrows: runtime traffic"]

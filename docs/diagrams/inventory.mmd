@@ -1,0 +1,62 @@
+sequenceDiagram
+    autonumber
+    participant Kafka as Kafka orders topic
+    participant Worker as Inventory consumer
+    participant Store as Persistence inventory transaction
+    participant DB as PostgreSQL
+
+    Kafka-->>Worker: OrderCreated record
+    Worker->>Worker: Parse envelope and validate event type/version
+    alt Malformed, unsupported, or unrelated record
+        Worker->>Worker: Log skipped record with topic, partition, offset
+        Worker->>Kafka: Commit offset so the group can continue
+    else Valid OrderCreated
+        Worker->>Store: process_order_created(event)
+        Store->>DB: Begin transaction, insert processed_events marker
+        alt Marker already exists
+            DB-->>Store: Conflict, no new marker
+            Store->>DB: Commit no-op transaction
+            Store-->>Worker: Duplicate
+            Worker->>Kafka: Commit offset
+        else New marker
+            Store->>DB: Lock order
+            Store->>Store: Verify event customer against order
+            alt Order is missing or customer does not match
+                Store-->>Worker: InvalidEvent, transaction rolls back
+                Worker->>Worker: Log invalid event
+                Worker->>Kafka: Commit skipped offset
+            else Customer matches
+                alt Order is no longer pending
+                    Store->>DB: Commit processed marker without stock changes
+                    Store-->>Worker: IgnoredNoLongerPending
+                    Worker->>Kafka: Commit offset
+                else Order is pending
+                    Store->>DB: Read persisted order items
+                    Store->>Store: Compare event lines against order items
+                    alt Event items do not match persisted order
+                        Store-->>Worker: InvalidEvent, transaction rolls back
+                        Worker->>Worker: Log invalid event
+                        Worker->>Kafka: Commit skipped offset
+                    else Event items match
+                        Store->>DB: Lock product rows in stable ID order
+                        alt Enough stock for every line
+                            Store->>DB: Decrement stock and insert reservations
+                            Store->>DB: Set order status to accepted
+                            Store->>DB: Enqueue OrderAccepted in outbox
+                            Store->>DB: Commit marker, stock, status, reservations, and event
+                            DB-->>Store: Commit succeeded
+                            Store-->>Worker: Accepted
+                            Worker->>Kafka: Commit offset after DB commit
+                        else One or more lines short on stock
+                            Store->>DB: Leave stock unchanged and set order status to rejected
+                            Store->>DB: Enqueue OrderRejected with reason
+                            Store->>DB: Commit marker, status, and event
+                            DB-->>Store: Commit succeeded
+                            Store-->>Worker: Rejected(reason)
+                            Worker->>Kafka: Commit offset after DB commit
+                        end
+                    end
+                end
+            end
+        end
+    end

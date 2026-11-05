@@ -1,0 +1,45 @@
+sequenceDiagram
+    autonumber
+    participant Kafka as Kafka orders topic
+    participant Worker as Notifications consumer
+    participant Store as Persistence notification transaction
+    participant DB as PostgreSQL
+
+    Kafka-->>Worker: OrderAccepted, OrderRejected, or OrderShipped
+    Worker->>Worker: Parse envelope and select handled event type
+    alt Malformed or unsupported record
+        Worker->>Worker: Log skipped record with Kafka location
+        Worker->>Kafka: Commit skipped offset
+    else Known event handled by another consumer
+        Worker->>Worker: Log unrelated known event
+        Worker->>Kafka: Commit skipped offset
+    else Supported lifecycle event
+        Worker->>Store: process_order_lifecycle_event(event)
+        Store->>Store: Validate schema, customer UUID, and event-specific data
+        alt Invalid payload semantics
+            Store-->>Worker: InvalidEvent before transaction
+            Worker->>Worker: Log invalid record
+            Worker->>Kafka: Commit skipped offset
+        else Payload is valid
+            Store->>DB: Begin transaction, insert processed_events marker
+            alt Duplicate event marker
+                DB-->>Store: Conflict, no new marker
+                Store->>DB: Commit no-op transaction
+                Store-->>Worker: Duplicate
+                Worker->>Kafka: Commit offset
+            else New event marker
+                Store->>DB: Verify order exists and customer matches
+                alt Order missing or customer mismatch
+                    Store-->>Worker: InvalidEvent, transaction rolls back
+                    Worker->>Worker: Log invalid record
+                    Worker->>Kafka: Commit skipped offset
+                else Order and customer match
+                    Store->>DB: Insert customer notification
+                    Store->>DB: Commit marker and notification together
+                    DB-->>Store: Commit succeeded
+                    Store-->>Worker: Created(kind)
+                    Worker->>Kafka: Commit offset after DB commit
+                end
+            end
+        end
+    end

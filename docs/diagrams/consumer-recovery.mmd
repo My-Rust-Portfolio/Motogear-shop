@@ -1,0 +1,20 @@
+sequenceDiagram
+    autonumber
+    participant Kafka as Kafka orders topic
+    participant Worker as Inventory consumer example
+    participant DB as PostgreSQL
+
+    Kafka-->>Worker: Deliver OrderCreated at offset N
+    Worker->>DB: Begin transaction, insert marker, apply stock and order changes, enqueue outcome
+    DB-->>Worker: Commit transaction
+    Note over Worker: Crash before offset commit.
+    Note over Kafka,DB: Consumer restarts, or another consumer-group member takes over.
+    Kafka-->>Worker: Redeliver OrderCreated at offset N
+    Worker->>DB: Begin transaction, insert same consumer and event marker
+    DB-->>Worker: Unique marker already exists
+    Worker->>DB: Commit no-op transaction
+    Worker->>Worker: Return Duplicate without repeating business effects
+    Worker->>Kafka: Commit processed record N's offset
+
+    Note over Worker,DB: DB retry window: 5 minutes, then exit without offset commit.
+    Note over Kafka,Worker: Skip invalid records and commit offset.

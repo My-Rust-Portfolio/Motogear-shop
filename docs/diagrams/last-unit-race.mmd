@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    participant Kafka as Kafka partitions
+    participant WorkerA as Inventory replica A
+    participant WorkerB as Inventory replica B
+    participant DB as PostgreSQL
+
+    Note over Kafka,DB: Two distinct orders each request one unit of the same product. One unit remains.<br/>Their events are on separate Kafka partitions assigned to different inventory replicas.
+    Kafka-->>WorkerA: OrderCreated for order A
+    Kafka-->>WorkerB: OrderCreated for order B
+    WorkerA->>DB: Begin transaction and insert event marker A
+    WorkerB->>DB: Begin transaction and insert event marker B
+    WorkerA->>DB: Lock order A, then lock the product row
+    DB-->>WorkerA: Product lock granted, stock is 1
+    WorkerB->>DB: Lock order B, then request the same product row lock
+    Note over WorkerB,DB: Replica B waits for replica A to finish the stock decision.
+    WorkerA->>DB: Decrement stock from 1 to 0 and insert reservation A
+    WorkerA->>DB: Accept order A and enqueue OrderAccepted
+    WorkerA->>DB: Commit transaction A
+    DB-->>WorkerA: Order A accepted, stock is 0
+    WorkerA->>Kafka: Commit order A offset
+    DB-->>WorkerB: Lock granted after A commits, current stock is 0
+    WorkerB->>WorkerB: Detect requested quantity exceeds available stock
+    WorkerB->>DB: Keep stock unchanged, reject order B, enqueue OrderRejected
+    WorkerB->>DB: Commit transaction B
+    DB-->>WorkerB: Order B rejected, stock remains 0
+    WorkerB->>Kafka: Commit order B offset

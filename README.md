@@ -248,6 +248,14 @@ The API currently exposes `GET /health/live` for process liveness and
 depend on PostgreSQL; readiness returns HTTP 503 until all migrations included
 in this build have been applied.
 
+## Code structure and sequence diagrams
+
+The project structure, end-to-end order journey, checkout and inventory races,
+consumer recovery, Kafka event processing, and notification read path are
+documented in [the architecture and sequence diagrams](docs/diagrams/README.md).
+The Mermaid sources and rendered SVG/PNG images are included alongside a
+script for regenerating them.
+
 Open the browser shop at <http://127.0.0.1:3000/>. Axum serves the HTML, CSS,
 and vanilla JavaScript from the same process as the API, with no frontend build
 step. The page loads the customer selector and catalogue from the API, remembers

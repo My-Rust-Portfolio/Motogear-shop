@@ -1,0 +1,85 @@
+sequenceDiagram
+    autonumber
+    actor Browser as Browser client
+    participant API as Axum API process
+    participant DB as PostgreSQL
+    participant Publisher as Outbox publisher
+    participant Kafka as Kafka orders topic
+    participant Inventory as Inventory consumer group
+    participant Fulfillment as Fulfillment consumer group
+    participant Notifications as Notifications consumer group
+
+    Note over Browser,Notifications: One possible successful execution, not a globally synchronized timeline.
+
+    Browser->>API: POST /api/v1/orders with idempotency key
+    API->>DB: Commit pending order, items, and OrderCreated outbox row
+    DB-->>API: Order committed
+    API-->>Browser: 201 pending and Location
+
+    Publisher->>DB: Poll oldest unpublished event
+    DB-->>Publisher: OrderCreated outbox row
+    Publisher->>Kafka: Publish OrderCreated
+    Publisher->>DB: Mark outbox row published after acknowledgement
+    Kafka-->>Inventory: Deliver OrderCreated
+    Inventory->>DB: Deduplicate, lock product rows, check stock
+    alt Enough stock
+        Inventory->>DB: Reserve stock, accept order, enqueue OrderAccepted
+        DB-->>Inventory: Transaction committed
+        Inventory->>Kafka: Commit OrderCreated record offset
+        Publisher->>DB: Poll next unpublished event
+        DB-->>Publisher: OrderAccepted outbox row
+        Publisher->>Kafka: Publish OrderAccepted
+        Publisher->>DB: Mark outbox row published after acknowledgement
+        par Fulfillment and OrderShipped publication
+            Kafka-->>Fulfillment: Deliver OrderAccepted
+            Fulfillment->>DB: Create simulated shipment, mark shipped, enqueue OrderShipped
+            DB-->>Fulfillment: Shipment transaction committed
+            Fulfillment->>Kafka: Commit OrderAccepted record offset
+            Publisher->>DB: Poll next unpublished event
+            DB-->>Publisher: OrderShipped outbox row
+            Publisher->>Kafka: Publish OrderShipped
+            Publisher->>DB: Mark outbox row published after acknowledgement
+        and Notifications handle acceptance independently
+            Kafka-->>Notifications: Deliver OrderAccepted
+            Notifications->>DB: Insert accepted notification and dedupe marker
+            DB-->>Notifications: Notification transaction committed
+            Notifications->>Kafka: Commit OrderAccepted record offset
+        end
+        par Browser reads order history
+            Browser->>API: GET /api/v1/customers/{customer_id}/orders?limit=20&offset=0
+            API->>DB: Read order history
+            DB-->>API: Shipped order
+            API-->>Browser: Show shipped status
+        and Browser reads notifications separately
+            Browser->>API: GET /api/v1/customers/{customer_id}/notifications?limit=20&offset=0
+            API->>DB: Read current notification rows
+            DB-->>API: Notifications available so far
+            API-->>Browser: Show current notifications
+        end
+        Kafka-->>Notifications: Deliver OrderShipped independently
+        Notifications->>DB: Insert shipped notification and dedupe marker
+        DB-->>Notifications: Notification transaction committed
+        Notifications->>Kafka: Commit OrderShipped record offset
+        Note over Browser,Notifications: Order history and notifications are separate reads.<br/>The browser may see shipped status before its notification appears.
+        Note over Publisher,Notifications: Fulfillment and notifications run in independent consumer groups.<br/>Publishing OrderShipped does not wait for acceptance notification creation<br/>or for the notifications consumer to commit its offset.
+    else Insufficient stock
+        Inventory->>DB: Leave stock unchanged, reject order, enqueue OrderRejected
+        DB-->>Inventory: Rejection transaction committed
+        Inventory->>Kafka: Commit OrderCreated record offset
+        Publisher->>DB: Poll next unpublished event
+        DB-->>Publisher: OrderRejected outbox row
+        Publisher->>Kafka: Publish OrderRejected
+        Publisher->>DB: Mark outbox row published after acknowledgement
+        Kafka-->>Notifications: Deliver OrderRejected independently
+        Notifications->>DB: Insert rejection notification and dedupe marker
+        DB-->>Notifications: Notification transaction committed
+        Notifications->>Kafka: Commit OrderRejected record offset
+        Browser->>API: GET /api/v1/customers/{customer_id}/orders
+        API->>DB: Read order history
+        DB-->>API: Rejected order
+        API-->>Browser: Show rejected status
+        Browser->>API: GET /api/v1/customers/{customer_id}/notifications
+        API->>DB: Read notification rows separately
+        DB-->>API: Rejection notification
+        API-->>Browser: Show rejection notification
+    end

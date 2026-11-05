@@ -1,0 +1,73 @@
+sequenceDiagram
+    autonumber
+    actor Browser as Browser shop
+    participant API as Axum orders route
+    participant Domain as OrderRequest validation
+    participant Store as Persistence order submission
+    participant DB as PostgreSQL
+
+    Browser->>API: POST /api/v1/orders + Idempotency-Key
+    API->>API: Require exactly one UUID Idempotency-Key
+    alt Key is missing, repeated, or invalid
+        API-->>Browser: 400 idempotency key error envelope
+    else Key is valid
+        API->>API: Parse JSON body and content type
+        alt Body is invalid, unsupported, or too large
+            API-->>Browser: 400, 413, or 415 error envelope
+        else Valid JSON request
+            API->>Domain: Validate item count, unique products, positive quantities
+            alt Domain validation fails
+                Domain-->>API: OrderRequestError
+                API-->>Browser: 422 invalid_order
+            else Validated and canonicalized request
+                Domain-->>API: ValidatedOrderRequest
+                API->>Store: submit_order(request, key)
+                Store->>DB: Find order by customer and key
+                alt Existing order has same request fingerprint
+                    DB-->>Store: Existing order
+                    Store-->>API: Original order, replayed=true
+                    API-->>Browser: 200 with original order ID and status
+                else Existing key has a different request
+                    DB-->>Store: Existing order with different fingerprint
+                    Store-->>API: IdempotencyConflict
+                    API-->>Browser: 409 idempotency_conflict
+                else New key
+                    Store->>DB: Begin transaction, lock customer
+                    Store->>DB: Lock active products and read current prices
+                    alt Customer missing or product unavailable
+                        DB-->>Store: Missing reference
+                        Store->>DB: Roll back active transaction on return
+                        Store-->>API: Persistence validation error
+                        API-->>Browser: 404 customer_not_found or 422 products_not_orderable
+                    else References valid
+                        Store->>Store: Calculate total from catalogue prices
+                        Store->>DB: Insert pending order using unique customer/key constraint
+                        alt This request claims the key
+                            Store->>DB: Insert purchase-time order items
+                            Store->>DB: Insert OrderCreated into outbox
+                            Store->>DB: Commit transaction
+                            DB-->>Store: Commit succeeded
+                            Store-->>API: OrderSubmission(replayed=false)
+                            API-->>Browser: 201 pending + Location header
+                        else Concurrent request already claimed the key
+                            DB-->>Store: Unique constraint prevented a second order
+                            Store->>DB: Load winning order in active transaction
+                            DB-->>Store: Existing order
+                            Store->>Store: Compare canonical request fingerprint
+                            alt Same request payload
+                                Store->>DB: Commit replay transaction
+                                DB-->>Store: Commit succeeded
+                                Store-->>API: Original order, replayed=true
+                                API-->>Browser: 200 with original order ID and status
+                            else Different request payload
+                                Store->>DB: Roll back transaction on conflict
+                                Store-->>API: IdempotencyConflict
+                                API-->>Browser: 409 idempotency_conflict
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    Note over API,DB: Dropping an active SQLx transaction after an early error rolls it back.

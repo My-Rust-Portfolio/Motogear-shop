@@ -1,0 +1,35 @@
+sequenceDiagram
+    autonumber
+    participant Publisher as Publisher worker
+    participant Store as Persistence outbox queries
+    participant DB as PostgreSQL
+    participant Kafka as Kafka topic
+
+    loop Poll for next event
+        Publisher->>Store: next_unpublished_event()
+        Store->>DB: Select oldest unpublished row by sequence
+        alt No event is available
+            DB-->>Store: No row
+            Store-->>Publisher: None
+            Publisher->>Publisher: Wait 500 ms
+        else Event found
+            DB-->>Store: Event, target topic, key, payload, attempts
+            Store-->>Publisher: Unpublished event
+            Publisher->>Kafka: Send keyed event and wait for broker acknowledgement
+            alt Kafka acknowledges
+                Kafka-->>Publisher: Delivery acknowledgement
+                Publisher->>Store: mark_outbox_event_published(event_id)
+                Store->>DB: Set published_at and clear last_error
+                DB-->>Store: Updated
+                Store-->>Publisher: Published
+            else Kafka delivery fails
+                Kafka-->>Publisher: Delivery error or timeout
+                Publisher->>Store: record_outbox_publish_failure(event_id, error)
+                Store->>DB: Increment attempts and save bounded error
+                DB-->>Store: Updated
+                Store-->>Publisher: Failure recorded
+                Publisher->>Publisher: Wait 2 seconds, then retry
+            end
+        end
+    end
+    Note over Publisher,DB: If Kafka accepts a message but the DB mark fails, the message can be sent again. Delivery is at least once.

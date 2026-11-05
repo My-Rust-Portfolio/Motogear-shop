@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    actor Browser as Browser shop
+    participant API as Axum catalogue routes
+    participant Store as Persistence catalogue queries
+    participant DB as PostgreSQL
+
+    par Load products
+        Browser->>API: GET /api/v1/products?limit=100&offset=0
+        API->>API: Validate bounded pagination
+        alt Invalid query parameters
+            API-->>Browser: 400 invalid_pagination
+        else Valid page
+            API->>Store: list_active_products(limit, offset)
+            Store->>DB: Select active products ordered by SKU and ID
+            alt Database query succeeds
+                DB-->>Store: Product rows
+                Store-->>API: Product records
+                API-->>Browser: 200 JSON product page
+            else Database query fails
+                DB-->>Store: SQLx error
+                Store-->>API: Persistence error
+                API-->>Browser: 503 database_unavailable
+            end
+        end
+    and Load customers
+        Browser->>API: GET /api/v1/customers?limit=100&offset=0
+        API->>API: Validate bounded pagination
+        alt Invalid query parameters
+            API-->>Browser: 400 invalid_pagination
+        else Valid page
+            API->>Store: list_customers(limit, offset)
+            Store->>DB: Select customers ordered by name and ID
+            DB-->>Store: Customer rows
+            Store-->>API: Customer records
+            API-->>Browser: 200 JSON customer page
+        end
+    end

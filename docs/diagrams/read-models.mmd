@@ -1,0 +1,60 @@
+sequenceDiagram
+    autonumber
+    actor Browser as Browser shop
+    participant API as Axum API routes
+    participant Store as Persistence read queries
+    participant DB as PostgreSQL
+
+    Browser->>API: GET /api/v1/orders/{order_id}
+    API->>API: Parse order UUID
+    alt Invalid order UUID
+        API-->>Browser: 400 invalid_order_id
+    else Valid order UUID
+        API->>Store: get_order_details(order_id)
+        Store->>DB: Begin read-only repeatable-read transaction
+        Store->>DB: Read order header and optional shipment
+        alt Order does not exist
+            Store->>DB: Commit read transaction
+            Store-->>API: None
+            API-->>Browser: 404 order_not_found
+        else Order exists
+            Store->>DB: Read purchase-time item rows in same snapshot
+            Store->>DB: Commit read transaction
+            Store-->>API: Order, shipment, and item details
+            API-->>Browser: 200 JSON order detail
+        end
+    end
+
+    par Refresh order history
+        Browser->>API: GET /api/v1/customers/{customer_id}/orders?limit=20&offset=0
+        API->>API: Parse customer UUID and bounded pagination
+        alt Invalid UUID or pagination
+            API-->>Browser: 400 error envelope
+        else Valid request
+            API->>Store: list_customer_orders(customer_id, page)
+            Store->>DB: Read customer and orders with purchase-time items
+            alt Customer exists
+                DB-->>Store: Orders newest first
+                Store-->>API: Order records
+                API-->>Browser: 200 JSON order history
+            else Customer missing
+                Store-->>API: CustomerNotFound
+                API-->>Browser: 404 customer_not_found
+            end
+        end
+    and Refresh notifications
+        Browser->>API: GET /api/v1/customers/{customer_id}/notifications?limit=20&offset=0
+        API->>API: Parse customer UUID and bounded pagination
+        API->>Store: list_customer_notifications(customer_id, page)
+        Store->>DB: Read customer and notifications ordered newest first
+        alt Customer exists
+            DB-->>Store: Notification rows
+            Store-->>API: Notification records
+            API-->>Browser: 200 JSON notification page
+        else Customer missing
+            Store-->>API: CustomerNotFound
+            API-->>Browser: 404 customer_not_found
+        end
+    end
+    Note over Store,DB: Reads use read-only repeatable-read snapshots.
+    Note over Browser,API: Browser refreshes selected-customer history and notifications.
